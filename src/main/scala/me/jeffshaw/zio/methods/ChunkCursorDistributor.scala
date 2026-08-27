@@ -80,9 +80,19 @@ private[methods] object ChunkCursorDistributor {
    * stop signal with an empty `chunk`: it carries no cause, because the cause of
    * a failing terminal is reported once by the fetcher that pulled it, never by
    * the workers that later observe the round.
+   *
+   * `chunk` is a `var` so a drained round can release it. Rounds are linked
+   * forward through `next` — round k's promise resolves to round k+1 — so a
+   * reference to any one round transitively reaches every later round. The seed
+   * round is captured by the worker closures for the whole run, so without
+   * releasing, every chunk the run has ever pulled stays reachable: retention
+   * grows with the length of the stream rather than being bounded by
+   * `bufferSize`. Clearing the field once the round can hand out no more
+   * elements keeps the small round objects chained while letting the large
+   * payload go.
    */
   private final class Round[E, A](
-    val chunk: Chunk[A],
+    @volatile var chunk: Chunk[A],
     val cursor: AtomicInteger,
     val next: Promise[Nothing, Round[E, A]],
     val terminal: Boolean
@@ -145,6 +155,17 @@ private[methods] object ChunkCursorDistributor {
       def publish(round: Round[E, A], next: Round[E, A]): ZIO[Any, Nothing, Unit] =
         round.next.done(Exit.succeed(next)).unit
 
+      // Releases a round's chunk once it can hand out no more elements. Only the
+      // designated fetcher calls this, and only after it has observed the
+      // boundary (`i == length`), so every element has already been claimed.
+      // Workers still running `f` on a claimed element do not touch `chunk`
+      // again: `loop` reads the element out of a local before invoking `f`. The
+      // field is `@volatile`, so a worker that re-enters `loop` on this round
+      // either sees the chunk (and its cursor is past the end, sending it to the
+      // await branch) or sees null and is likewise past the end.
+      def release(round: Round[E, A]): Unit =
+        round.chunk = null.asInstanceOf[Chunk[A]]
+
       // A `ZIO.whileLoop` version of this loop was implemented and reverted: it
       // cut allocation by 23-38% while costing ~30% throughput, with
       // non-overlapping error bars. Throughput is the objective and allocation
@@ -158,25 +179,37 @@ private[methods] object ChunkCursorDistributor {
         // must not report it again.
         if (round.terminal) Exit.unit
         else {
-          val i = round.cursor.getAndIncrement()
-          if (i < round.chunk.length)
-            f(round.chunk(i)).foldCauseZIO(onError, _ => loop(round))
-          else if (i == round.chunk.length)
+          // Read the chunk once. A drained round's `chunk` is nulled by the
+          // fetcher, and a worker can re-enter `loop` on such a round; reading
+          // into a local keeps the length checks and the element read consistent
+          // with each other regardless of when that happens.
+          val chunk  = round.chunk
+          val length = if (chunk eq null) 0 else chunk.length
+          val i      = round.cursor.getAndIncrement()
+          if (i < length)
+            // The element is read out of the local before `f` runs, so `f` never
+            // reaches back into the round.
+            f(chunk(i)).foldCauseZIO(onError, _ => loop(round))
+          else if (i == length && (chunk ne null))
             // Designated fetcher.
             fetch.flatMap { take =>
               take.exit.foldExit(
                 cause =>
                   Cause.flipCauseOption(cause) match {
                     case None =>
-                      publish(round, Round.terminal[E, A])
+                      publish(round, Round.terminal[E, A]) *> ZIO.succeed(release(round))
                     case Some(c) =>
                       // The fetcher is the sole reporter of a terminal cause:
                       // the round it publishes carries only the stop signal.
-                      publish(round, Round.terminal[E, A]) *> onError(c)
+                      publish(round, Round.terminal[E, A]) *> ZIO.succeed(release(round)) *> onError(c)
                   },
                 chunk => {
                   val nextRound = Round.data[E, A](chunk)
-                  publish(round, nextRound) *> loop(nextRound)
+                  // Publish first, then drop this round's chunk: the successor
+                  // is what keeps the run moving, and after it is published no
+                  // worker can claim from this round again. This is what stops
+                  // the seed round from transitively pinning the whole stream.
+                  publish(round, nextRound) *> ZIO.succeed(release(round)) *> loop(nextRound)
                 }
               )
             }
