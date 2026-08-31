@@ -40,12 +40,48 @@ worker owns a whole chunk starves workers whenever there are fewer chunks than
 There is no barrier at chunk boundaries — a worker that finishes an element
 immediately claims the next — so one slow `f` never idles the other workers.
 
-The round/cursor protocol itself: a *round* holds a chunk, a cursor, and a
-promise for the next round. Each worker does `i = cursor.getAndIncrement()`;
-`i < length` runs `f(chunk(i))`, `i == length` makes that worker the designated
-fetcher (exactly one observes the boundary, by construction), and `i > length`
+The round/cursor protocol itself: a *round* holds a chunk, a cursor, a stride,
+and a promise for the next round. Each worker claims a range with
+`i = cursor.getAndAdd(stride)`; `i < length` runs `f` over
+`[i, min(i + stride, length))`, `i >= length` means the round is drained and
+elects one worker as the designated fetcher, and a worker that is not elected
 awaits the next round. Terminal rounds carry the end-of-stream or failure
 signal, and are detected before the cursor is touched.
+
+### Claims are batched only where batching is free
+
+Once `f` is cheap, the cost of dispatch is the cursor's atomic operation, paid
+per element. A worker therefore claims a contiguous *range* of `stride` elements
+per atomic and runs them without returning to the cursor.
+
+The stride is what makes this safe. It is derived per round as
+`length / (n * 8)`, capped at 16: every worker is left at least eight claims, so
+a worker that draws one oversized claim is at most an eighth of the round behind
+the rest, whatever `f` costs. Below `n * 8` elements per round the quotient is
+zero, the stride pins to 1, and dispatch is exactly per-element again — so the
+"single chunk saturates all `n` workers" guarantee holds unchanged, and a slow
+`f`, where a round rarely has that many elements per worker, never batches at
+all.
+
+Sizing the stride to give each worker *one* claim (`length / n`) was tried first
+and measured 7–9% **slower** at `n` in the thousands with a 5 ms `f`: with one
+claim apiece the round ends when the slowest single claim ends, so a 16-element
+claim serialized 80 ms behind everyone else. Requiring several claims per worker
+keeps the amortization where `f` is cheap and restores fine-grained balance
+where it is not.
+
+Stride 1 is kept as a literal fast path — `getAndIncrement` rather than
+`getAndAdd(1)`, `f` invoked directly rather than through the range loop, and no
+election flag allocated — so the slow-`f` regime runs the pre-batching code with
+no added work. Without that fast path it measured ~2–4% slower at `n = 16384`.
+
+A stride above 1 also changes how the fetcher is elected. With unit strides the
+cursor's values are consecutive, so exactly one worker sees `i == length` and
+that test elects it for free. A larger stride makes the values skip, so none need
+land on `length` at all and the same test would elect *nobody* and hang the run;
+batched rounds elect by CAS on a per-round flag instead. `claims partition the
+chunk at every length/n ratio` is the regression test for this — reverting the
+election to `i == length` makes it deadlock rather than fail quietly.
 
 ### The producer fiber and queue are deliberate
 
@@ -91,29 +127,48 @@ The two rank differently often enough that scoring on allocation alone is
 misleading — a `ZIO.whileLoop` worker loop, for instance, cut allocation by
 23–38% while costing ~30% throughput, and was reverted.
 
-Measured on 32 cores, JMH throughput mode.
+Measured on 32 cores, JMH throughput mode. Scores below are ± the JMH error over
+several forks; the `n = 4` benchmarks in particular vary enough fork to fork that
+single-fork runs are not comparable — read them across forks or not at all.
 
-Combinator overhead, 500k elements, no-op `f` (`StreamParBenchmark`):
+Combinator overhead, 500k elements, no-op `f`, `n = 4` (`StreamParBenchmark`):
 
 | Approach | ops/s |
 |---|---|
-| `runForeachPar` | 158 |
-| `runForeachChunk` + `foreachParDiscard` | 23 |
-| `mapZIOParUnordered().runDrain` | 0.6 |
+| `runForeachPar` | 165 ± 1 |
+| `runForeachChunk` + `foreachParDiscard` | 19.2 ± 0.6 |
+| `mapZIOParUnordered().runDrain` | 0.65 ± 0.03 |
+
+Batched claims are what moved the first row; against the same combinator with
+per-element claims:
+
+| `f`, 500k elements, `n = 4` | per-element | batched |
+|---|---|---|
+| no-op | 127 ± 10 | 165 ± 1 |
+| `BigDecimal.pow(3)` | 35.7 ± 4.6 | 46.4 ± 4.9 |
+| no-op, CPU-bound producer | 134 ± 11 | 181 ± 5 |
+| no-op, parking producer | 96.9 ± 8.5 | 114 ± 3 |
 
 High-concurrency IO-like `f` — 200k elements, 2000-element chunks,
 `f = ZIO.sleep(5ms)` (`RealisticParBenchmark`):
 
 | `n` | elements/s |
 |---|---|
-| 2,048 | 350k |
-| 16,384 | 861k |
-| 40,960 | 726k |
+| 2,048 | 351k |
+| 16,384 | 641k |
+
+(Measured at `-f 3 -wi 3 -i 5`. This benchmark is sensitive to the warmup
+settings — a longer warmup reaches ~860k at `n = 16384` — so compare variants
+only within one configuration.)
 
 At that scale the binding constraint is the ZIO runtime's own fiber wake and
 timer path, not this combinator: `runForeachPar` runs at or slightly above a
 stream-free `ZIO.foreachParDiscard(...).withParallelism(n)` control. The dip
-from 16k to 40k is the runtime degrading past ~16k fibers.
+from 16k to 40k is the runtime degrading past ~16k fibers. Batching does not
+engage in this regime at all — rounds hold fewer than `n * 8` elements, so the
+stride is 1 — and the stride-1 fast paths exist to keep it costing nothing
+there; measured against per-element claims it is a wash (3.21 ± 0.11 vs
+3.24 ± 0.05 ops/s at `n = 16384`).
 
 Note that with a no-op or very cheap `f`, sequential `runForeach` is faster than
 any parallel variant — the workers are pure coordination overhead with nothing
