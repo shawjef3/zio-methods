@@ -87,13 +87,29 @@ election to `i == length` makes it deadlock rather than fail quietly.
 
 A queue-less variant, where the fetching worker pulls the stream directly
 (`ZStream#toPull`), allocates ~29% less and is CPU-neutral on in-memory
-sources. It was measured and rejected: on a source that *parks* — a socket, a
-queue, a JDBC cursor, any async API — it loses ~44% throughput. When the
-fetcher is itself a worker, nothing is queued behind it while it is parked, so
-the remaining workers idle once the current chunk drains. The producer fiber
-keeps filling the queue across a parked pull, and that is worth more than the
-allocation it costs. `StreamParBenchmark.zioRunForeachParBlockingUpstream`
-guards against reintroducing the queue-less shape.
+sources. It was measured and rejected.
+
+The precondition is a source that cannot keep the workers fed — the stream
+producing more slowly than the pool consumes. When the fetcher is itself a
+worker, nothing is queued behind it while it waits, so the remaining workers
+idle once the current chunk drains. The producer fiber keeps filling the queue
+across that wait, holding up to `bufferSize` of work in flight, and that is
+worth more than the allocation it costs.
+
+But a slow producer alone does not reproduce the collapse. `slowUpstream` is
+already producer-limited — throughput falls monotonically with `upstreamCost`
+(226 / 137 / 57 / 7.1 ops/s at 0 / 200 / 2000 / 20000, `n = 4`) — and the
+queue-less variant is CPU-neutral on it. What the ~44% loss needs in addition
+is a pull that *parks*: a socket, a queue, a JDBC cursor, any async API. A
+suspended pull costs a scheduler wake to resume on top of the wait, where a
+slow on-CPU pull merely occupies the fiber.
+
+`StreamParBenchmark.zioRunForeachParBlockingUpstream` supplies that shape — a
+bounded queue with a small buffer, so the consumer really does out-run it and
+the pull really does suspend — and guards against reintroducing the queue-less
+design. Keeping it alongside `zioRunForeachParSlowUpstream` is what separates
+"the producer is slow" from "the producer parks"; only the second sinks the
+queue-less shape.
 
 ### The fetcher drains the whole buffer, not one chunk
 
