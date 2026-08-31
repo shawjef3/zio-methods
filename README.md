@@ -14,13 +14,72 @@ ZIO fork rather than merged upstream. Depends on `dev.zio %% zio-streams %
 - `ChunkCursorDistributor` — the chunk-transport / element-dispatch engine
   behind `runForeachPar`.
 
+## Which combinator do I want?
+
+`runForeachPar` is narrow on purpose: it is the fastest way to run an effect
+over every element **when you do not need the results and do not need order**.
+Two questions settle it: do you need what `f` returns, and is `f` worth a fiber?
+
+```
+Do you need f's results downstream?
+├─ yes ─→ ordered?  ─ yes ─→ mapZIOPar(n)(f)
+│                    └ no ──→ mapZIOParUnordered(n)(f)
+└─ no ──→ is f expensive enough to be worth a fiber?
+          (any real I/O: yes. pure CPU: see the crossover below)
+          ├─ no ──→ runForeach(f)          ← sequential wins below that
+          └─ yes ─→ runForeachPar(n)(f)    ← this library
+```
+
+| You need | Use | Why not `runForeachPar` |
+|---|---|---|
+| results, in order | `mapZIOPar(n)(f)` | discards results |
+| results, any order | `mapZIOParUnordered(n)(f)` | discards results |
+| effects only, cheap `f` | `runForeach(f)` | workers cost more than they save |
+| effects only, costly `f` | **`runForeachPar(n)(f)`** | — |
+| effects only, whole chunk at a time | `runForeachChunk(f)` | hands `f` elements, not chunks |
+
+The last row is the one people reach for when `f` amortizes over a batch — a
+bulk insert, a batched API call. Note that `runForeachChunk` runs chunks
+*sequentially*; ZIO has no parallel variant of it. To get batching and
+concurrency together, regroup so each element is itself a batch and hand that
+to `runForeachPar` — then `n` bounds concurrent *batches*:
+
+```scala
+stream.grouped(100).runForeachPar(4)(batch => insertAll(batch))
+```
+
+Sizing `n`: it bounds concurrent invocations of `f`, so set it to what the
+*downstream resource* tolerates — a connection-pool size, an API rate limit,
+`availableProcessors` for CPU-bound work. It is not a thread count; the workers
+are fibers, and tens of thousands of them are routine for I/O-bound `f` (see
+the high-concurrency numbers under [Performance](#performance)).
+
+The second argument, `bufferSize` (default 16), sets how many chunks may be
+in flight ahead of the workers. Raise it when the source is slow or bursty;
+it is also the fusion window, so it affects throughput at high `n`.
+
+### Caveats worth knowing before you adopt it
+
+- **Results are discarded.** `f`'s return value is dropped. If you need it,
+  you want `mapZIOPar*` and the buffering that comes with it — that cost is
+  what you are paying for, not waste.
+- **Order is not preserved**, and there is no chunk boundary barrier: element
+  *k+1* may start before element *k* finishes.
+- **Fail-fast, but not fail-first.** The first failure interrupts the rest,
+  and because interruption is not instantaneous, more than one failure can be
+  recorded. The effect fails with all of them combined (`Cause.Both`), not
+  with whichever was first. Match on the cause accordingly.
+- **`n <= 0` degrades to sequential** `runForeach`, ignoring `bufferSize`.
+  `n == 1` does *not*: it keeps the worker topology, so the stream is still
+  consumed concurrently with `f`.
+
 ## Design
 
 `runForeachPar` exists because `mapZIOParUnordered(n)(f).runDrain` pays to
 buffer and re-chunk results that are then thrown away. Discarding them up front
 is worth roughly two orders of magnitude in throughput.
 
-Three decisions shape the implementation.
+Four decisions shape the implementation.
 
 ### Transport is chunk-granular; dispatch is element-granular
 
@@ -186,10 +245,31 @@ stride is 1 — and the stride-1 fast paths exist to keep it costing nothing
 there; measured against per-element claims it is a wash (3.21 ± 0.11 vs
 3.24 ± 0.05 ops/s at `n = 16384`).
 
-Note that with a no-op or very cheap `f`, sequential `runForeach` is faster than
-any parallel variant — the workers are pure coordination overhead with nothing
-to divide. Parallelism starts paying somewhere around a `BigDecimal.pow(3)` per
-element, and the advantage grows with the cost of `f`.
+### Where parallelism starts paying
+
+With a cheap `f`, sequential `runForeach` beats any parallel variant — the
+workers are coordination overhead with nothing to divide. `CrossoverBenchmark`
+sweeps the cost of `f` against both, 100k elements, `n = 4`:
+
+| `f` cost (multiply-add iterations) | `runForeach` | `runForeachPar(4)` | faster |
+|---|---|---|---|
+| 0 | 601 ± 8 | 360 ± 23 | sequential, 1.7× |
+| 10 | 504 ± 52 | 348 ± 17 | sequential, 1.4× |
+| 50 | 511 ± 16 | 344 ± 12 | sequential, 1.5× |
+| 200 | 396 ± 22 | 291 ± 4 | sequential, 1.4× |
+| 1,000 | 164 ± 6 | 225 ± 3 | **parallel, 1.4×** |
+| 5,000 | 37.9 ± 0.7 | 113 ± 5 | **parallel, 3.0×** |
+
+The crossover sits between 200 and 1,000 iterations, and the parallel advantage
+keeps growing past it — it is bounded by cores, so with `n = 4` it tends toward
+4×. Below the crossover the penalty is real but bounded, hovering around 1.5×
+rather than growing.
+
+These are iteration counts, not times: attempts to calibrate them to nanoseconds
+were defeated by the JIT hoisting the loop, so treat the column as an ordinal
+scale on this machine. The practical reading is that a few hundred arithmetic
+operations per element is roughly the break-even point, and that anything doing
+real I/O is far past it.
 
 ## Layout
 
@@ -199,6 +279,8 @@ element, and the advantage grows with the cost of `f`.
   dropped).
   - `StreamParBenchmark` — combinator overhead against alternatives, plus
     slow-upstream and blocking-upstream regression guards.
+  - `CrossoverBenchmark` — `runForeachPar` vs. sequential `runForeach` across a
+    sweep of `f` costs, locating where parallelism starts paying.
   - `RealisticParBenchmark` — high-concurrency IO-like `f`, with a stream-free
     control benchmark for the runtime ceiling.
 
@@ -208,4 +290,5 @@ element, and the advantage grows with the cost of `f`.
 sbt test
 sbt "benchmarks/Jmh/run -f 2 -wi 5 -i 5 StreamParBenchmark"
 sbt "benchmarks/Jmh/run -f 1 RealisticParBenchmark"
+sbt "benchmarks/Jmh/run -f 2 CrossoverBenchmark"
 ```
