@@ -25,7 +25,8 @@ Do you need f's results downstream?
 ├─ yes ─→ ordered?  ─ yes ─→ mapZIOPar(n)(f)
 │                    └ no ──→ mapZIOParUnordered(n)(f)
 └─ no ──→ is f expensive enough to be worth a fiber?
-          (any real I/O: yes. pure CPU: see the crossover below)
+          (any real I/O: yes — but see the Little's law note below.
+           pure CPU: see the crossover under Performance)
           ├─ no ──→ runForeach(f)          ← sequential wins below that
           └─ yes ─→ runForeachPar(n)(f)    ← this library
 ```
@@ -57,6 +58,41 @@ the high-concurrency numbers under [Performance](#performance)).
 The second argument, `bufferSize` (default 16), sets how many chunks may be
 in flight ahead of the workers. Raise it when the source is slow or bursty;
 it is also the fusion window, so it affects throughput at high `n`.
+
+### When `f` is slow, this combinator stops being the variable
+
+Everything above is about dispatch overhead, which is tens of nanoseconds per
+element. Once `f` takes milliseconds — a database round trip, an HTTP call —
+that overhead is several orders of magnitude below the work, and throughput is
+governed by Little's law instead:
+
+```
+records/s  ≈  n / mean_latency_of_f
+```
+
+Two consequences worth knowing before spending time on tuning.
+
+**Size `n` off the mean, not the median.** Service latencies are usually right
+skewed, so the mean sits above the median and the two diverge by more than you
+would guess. A distribution with a 185 ms median and a 165 ms standard
+deviation (log-normal) has a mean nearer 230 ms — so sizing `n` off the median
+over-predicts throughput by roughly a quarter. Solve `n = target_rate × mean`
+then check that `n` against what the downstream resource will actually run
+concurrently; beyond that point the extra workers queue inside the client
+library, where this combinator can neither see nor help them.
+
+**The choice among the parallel combinators stops mattering.** At that
+latency, `runForeachPar` and `mapZIOParUnordered(n)(f).runDrain` will measure
+the same, because what separates them is per-element bookkeeping that has
+become a rounding error. Pick on semantics instead — `runForeachPar` because
+it discards results and has no chunk boundary barrier, not because it is
+faster. The measured advantages in [Performance](#performance) are real, but
+they are advantages in a regime your workload has left.
+
+The lever that does still move a latency-bound pipeline is reducing the number
+of round trips: batch at the source (`grouped`, above) so each `f` covers many
+records. That divides the latency across the batch, which no amount of
+dispatch tuning can do.
 
 ### Caveats worth knowing before you adopt it
 
