@@ -20,7 +20,7 @@ import zio._
 import zio.stream.Take
 import zio.stacktracer.TracingImplicits.disableAutoTrace
 
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 /**
  * Dispatches the elements of chunk-granular [[Take]]s to a pool of worker fibers
@@ -136,7 +136,7 @@ private[methods] object ChunkCursorDistributor {
      * there is the round large enough for it to disappear into the per-round
      * cost.
      */
-    val fetching: java.util.concurrent.atomic.AtomicBoolean
+    val fetching: AtomicBoolean
   )
 
   private object Round {
@@ -202,7 +202,7 @@ private[methods] object ChunkCursorDistributor {
         // `i == length` test does it, so the flag is never read and is left
         // unallocated. That keeps a slow-`f` run — where every round is stride 1
         // — allocating exactly what it did before batching existed.
-        if (stride == 1) null else new java.util.concurrent.atomic.AtomicBoolean(false)
+        if (stride == 1) null else new AtomicBoolean(false)
       )
     }
 
@@ -253,9 +253,12 @@ private[methods] object ChunkCursorDistributor {
     onError: Cause[E1] => ZIO[R, Nothing, Unit]
   )(implicit trace: Trace): ZIO[R, Nothing, Unit] =
     ZIO.suspendSucceed {
-      // Seed round: an already-exhausted placeholder. Its length is 0, so every
-      // worker's first claim lands at or past the end; the one that wins
-      // `fetching` performs the initial fetch and the rest await.
+      // Seed round: an already-exhausted placeholder. Its length is 0, so
+      // `strideFor` takes the `length <= 0` guard and the seed is a stride-1
+      // round with no `fetching` flag allocated. Election is therefore the
+      // implicit one: every worker's first claim lands at or past the end,
+      // exactly one of them sees `i == 0 == length` and performs the initial
+      // fetch, and the rest await the round it publishes.
       val seed = Round.data[E, A](Chunk.empty, n)
 
       // Publishes the round the fetcher just built to the workers awaiting it.
