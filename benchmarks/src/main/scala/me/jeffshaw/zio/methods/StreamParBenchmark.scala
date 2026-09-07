@@ -168,11 +168,17 @@ class StreamParBenchmark {
   // the *producer*, in a `mapChunks` stage, so it runs on whichever fiber pulls
   // the stream.
   //
-  // Note what this does NOT measure: CPU-bound upstream work occupies the
-  // fetching worker but never *parks* it, so the other workers keep running and
-  // the fetcher never becomes the bottleneck. For a source that suspends, see
-  // the blocking-upstream benchmark below — that distinction is what settled
-  // the choice in favor of the current queue-based design.
+  // `upstreamCost` throttles the run from the producer side: measured at
+  // n = 4, throughput falls monotonically with it (226 / 137 / 57 / 7.1 ops/s
+  // at 0 / 200 / 2000 / 20000), so even the default 200 already makes the
+  // producer the limiting stage rather than the workers.
+  //
+  // What this does NOT reproduce is the queue-less design's collapse, which
+  // needs a pull that *suspends* — see the blocking-upstream benchmark below.
+  // A slow on-CPU pull and a parked one both keep the fetcher from running `f`,
+  // but only the parked one costs a scheduler wake to resume, and only it was
+  // measured to sink the queue-less shape. Keeping both benchmarks is what
+  // separates "producer is slow" from "producer parks".
   // ---------------------------------------------------------------------------
 
   @Param(Array("0", "50", "200"))
@@ -210,18 +216,22 @@ class StreamParBenchmark {
   // Blocking-upstream variant: the case the CPU-bound sweep above cannot reach,
   // and a regression guard for the producer-fiber + queue design.
   //
-  // `slowUpstream` burns cycles on the pulling fiber but never *parks* it, so
-  // the non-fetching workers keep going and the fetcher never becomes a
-  // bottleneck. A source that suspends is a different shape, and it is why the
-  // producer fiber and queue are worth their cost: the producer keeps filling
-  // the queue while workers process, so up to `bufferSize` of work stays in
-  // flight across a parked pull.
+  // A source that cannot keep up with the workers is the precondition, and
+  // `slowUpstream` above already supplies it — its producer is the limiting
+  // stage from `upstreamCost = 200` on. What that benchmark lacks is a pull
+  // that *suspends*: its cost is burned on-CPU, so the pulling fiber is busy
+  // rather than parked, and it does not reproduce the queue-less collapse.
+  //
+  // This benchmark adds the parking. A suspended pull costs a scheduler wake to
+  // resume on top of the wait itself, and that is the shape where the producer
+  // fiber and queue pay for themselves, by keeping up to `bufferSize` of work in
+  // flight across the wait.
   //
   // A queue-less design in which the fetcher is itself a worker (pulling the
-  // stream directly; measured and rejected) loses ~44% throughput here: while that worker is parked on
-  // the pull, nothing is queued behind it, and once the current chunk drains
-  // the remaining workers idle until the pull returns. Keep this benchmark as
-  // the guard against reintroducing that shape.
+  // stream directly; measured and rejected) loses ~44% throughput here: while
+  // that worker waits on the pull, nothing is queued behind it, and once the
+  // current chunk drains the remaining workers idle until the pull returns.
+  // Keep this benchmark as the guard against reintroducing that shape.
   //
   // The source is a bounded `Queue` fed by a forked producer, so `queue.take`
   // genuinely suspends the fiber rather than spinning.

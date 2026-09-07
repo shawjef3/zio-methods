@@ -1,0 +1,21 @@
+# Keep line endings LF in the repository.
+#
+# The history is already all-LF; this makes that explicit rather than leaving it
+# dependent on each contributor's core.autocrlf setting. Git stores LF in blobs
+# and converts in the working tree, so `text eol=lf` also asks for LF on
+# checkout — which keeps a Windows worktree byte-identical to the blobs instead
+# of round-tripping CRLF on the way in and out.
+*               text=auto
+
+# Explicit for sources and build files, so intent does not rest on Git's
+# content heuristics.
+*.scala         text eol=lf
+*.sbt           text eol=lf
+*.properties    text eol=lf
+*.md            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.json          text eol=lf
+*.xml           text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf

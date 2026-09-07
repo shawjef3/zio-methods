@@ -259,6 +259,74 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
                )
         } yield assertCompletes
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
+      test("a chunk large enough to batch claims still keeps all n workers busy") {
+        // The saturation test above uses `length == n`, which sizes the stride to
+        // 1 and so only exercises per-element dispatch. Here the chunk is far
+        // larger than `n`, putting the stride above 1: batched claims must still
+        // reach every worker. They do because the stride leaves each worker
+        // several claims rather than exactly one — the property `ClaimsPerWorker`
+        // exists to guarantee, and the one a stride sized to `length / n` would
+        // lose.
+        val n      = 16
+        val script = Chunk(Take.chunk(Chunk.fromIterable(1 to (n * 64))), Take.end)
+        for {
+          arrived       <- Ref.make(0)
+          allArrived    <- Promise.make[Nothing, Unit]
+          fetchAndCount <- scriptedFetch[String, Int](script)
+          (fetch, _)     = fetchAndCount
+          _ <- ChunkCursorDistributor.run[Any, String, String, Int](
+                 n,
+                 fetch,
+                 _ =>
+                   arrived.updateAndGet(_ + 1).flatMap { count =>
+                     // Only the first n elements gate on each other; the rest run
+                     // freely, so the run can finish once saturation is shown.
+                     allArrived.succeed(()).when(count == n) *> allArrived.await
+                   },
+                 noError
+               )
+        } yield assertCompletes
+      } @@ TestAspect.jvmOnly @@ nonFlaky(20),
+      test("claims partition the chunk at every length/n ratio") {
+        // The stride is derived from `length / (n * ClaimsPerWorker)`, so
+        // different length/n ratios exercise different strides — including the
+        // ratios where `length` is not a multiple of the stride and the final
+        // claim is short. Across all of them the claimed ranges must still
+        // partition the chunk: every element exactly once, none twice, none
+        // skipped.
+        //
+        // This is also the guard on fetcher election. A stride above 1 makes the
+        // cursor skip values, so an election test phrased in terms of `i` can
+        // elect nobody and hang; the run would then time out rather than fail an
+        // assertion.
+        checkAll(
+          Gen.fromIterable(
+            for {
+              length <- Chunk(1, 7, 63, 64, 65, 1000, 1023)
+              n      <- Chunk(1, 2, 3, 16, 64)
+            } yield (length, n)
+          )
+        ) { case (length, n) =>
+          val script = Chunk(Take.chunk(Chunk.fromIterable(1 to length)), Take.end)
+          for {
+            counts        <- Ref.make(Map.empty[Int, Int])
+            fetchAndCount <- scriptedFetch[String, Int](script)
+            (fetch, calls) = fetchAndCount
+            _ <- ChunkCursorDistributor.run[Any, String, String, Int](
+                   n,
+                   fetch,
+                   a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)),
+                   noError
+                 )
+            res     <- counts.get
+            fetches <- calls
+          } yield assertTrue(res.size == length) &&
+            assertTrue(res.values.forall(_ == 1)) &&
+            // Exactly one fetcher per round, so one pull for the chunk and one
+            // for the terminal — never zero (a lost election hangs) and never two.
+            assertTrue(fetches == 2)
+        }
+      } @@ nonFlaky(20),
       test("n = 1 visits every element") {
         // `runForeachPar` short-circuits n <= 1 to `runForeach`, so this path is
         // unreachable through the public combinator.
