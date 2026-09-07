@@ -341,6 +341,14 @@ private[methods] object ChunkCursorDistributor {
           // atomic of its own — the original protocol, unchanged. Only a stride
           // above 1 skips bases, and only there is the CAS needed; those rounds
           // are by construction large enough to absorb one atomic apiece.
+          //
+          // `chunk ne null` keeps a released round from re-electing: a worker
+          // that re-enters `loop` on one goes to the await branch instead. For a
+          // batched round the CAS would also refuse it — `release` runs only in
+          // this branch, after the winner has published, so `fetching` is already
+          // true by the time the chunk is nulled — which makes the guard belt and
+          // braces there, and the sole protection on the stride-1 path, where
+          // there is no flag to fall back on.
           else if ((chunk ne null) && (if (stride == 1) i == length else round.fetching.compareAndSet(false, true)))
             // Designated fetcher.
             fetch.flatMap { take =>
