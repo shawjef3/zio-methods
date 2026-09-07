@@ -55,9 +55,52 @@ Sizing `n`: it bounds concurrent invocations of `f`, so set it to what the
 are fibers, and tens of thousands of them are routine for I/O-bound `f` (see
 the high-concurrency numbers under [Performance](#performance)).
 
-The second argument, `bufferSize` (default 16), sets how many chunks may be
-in flight ahead of the workers. Raise it when the source is slow or bursty;
-it is also the fusion window, so it affects throughput at high `n`.
+### Sizing `bufferSize` and chunks
+
+The second argument, `bufferSize` (default 16), sets how many chunks may be in
+flight ahead of the workers. It is also the fusion window: the designated
+fetcher drains everything buffered and fuses it into one round, so the round a
+worker pool sees is
+
+```
+fused round elements  =  bufferSize × chunkSize     (when the queue is full)
+```
+
+**`bufferSize` counts chunks, not elements**, which is the easy mistake — it is
+not a quantity to compare against `n`. Setting `bufferSize = n` at `n = 2250`
+with 500-element chunks would hold 1.1 million records resident. The quantity
+that should exceed `n` is the product:
+
+```
+chunkSize × bufferSize  ≥  n × 2..8     round covers the pool a few times over
+chunkSize               ≳  64           below this, per-chunk queue overhead dominates
+chunkSize × bufferSize  ≤  heap budget  these records are resident
+```
+
+A round sized to exactly `n` gives each worker one element and drains in a
+single pass, putting you back at a round boundary immediately — hence the
+factor above 1. Solving for the parameter, `bufferSize ≈ (n / chunkSize) × 2..8`:
+at `n = 2250` with 500-element chunks that is 16–32, not thousands.
+
+Two ceilings cap this regardless of the arithmetic. The queue only ever holds
+what the producer has actually produced — `takeBetween` returns immediately
+with whatever is there, so raising `bufferSize` past what the source can stay
+ahead of buys nothing. And the benefit is making round boundaries rarer, so
+going from one round per worker-pass to four matters and from forty to a
+hundred and sixty does not.
+
+**Should you `rechunk` first?** Usually no. Dispatch is element-granular, so a
+single chunk of `≥ n` elements already saturates all `n` workers — chunk size
+matters far less here than in a combinator where a worker owns a whole chunk.
+It is worth rechunking only when the source emits pathologically small chunks
+(one element per callback, say) *and* `chunkSize × bufferSize < n`. Even then,
+raising `bufferSize` is the cheaper fix, because `rechunk` copies every element
+and, on a slow source, adds latency while it waits to fill a chunk. Chunks
+already in the hundreds — what a Kafka consumer or a JDBC cursor typically
+yields — want no reshaping at all.
+
+All of this is dispatch tuning, and dispatch stops being what governs
+throughput once `f` is slow — see the next section before spending time here.
 
 ### When `f` is slow, this combinator stops being the variable
 
