@@ -98,6 +98,25 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 private[methods] object ChunkCursorDistributor {
 
   /**
+   * How many consecutive elements a worker may run before returning control to
+   * the ZIO interpreter, unwinding the JVM stack.
+   *
+   * `foldCauseZIO` on an already-completed `Exit` invokes its continuation
+   * inline, so a synchronous `f` — `Exit.unit`, `ZIO.succeed`, any pure
+   * computation — turns the `loop`/`runClaim` cycle into plain JVM recursion
+   * whose depth is the length of the round. Measured before this existed: a
+   * single 200,000-element chunk with a no-op `f` overflows a 512KB stack, and
+   * the `StackOverflowError` escapes as a fiber defect rather than something a
+   * caller can catch. A suspending `f` never builds the chain, which is why the
+   * existing tests and the I/O-shaped benchmarks never hit it.
+   *
+   * 512 sits ~200x below the measured overflow point on the smallest stack
+   * tested, and costs one extra effect node per 512 elements — under 0.2% of
+   * the per-element work even when `f` is a no-op.
+   */
+  private final val TrampolineEvery = 512
+
+  /**
    * One round of dispatch over a single chunk. A ''terminal'' round is a pure
    * stop signal with an empty `chunk`: it carries no cause, because the cause of
    * a failing terminal is reported once by the fetcher that pulled it, never by
@@ -292,14 +311,16 @@ private[methods] object ChunkCursorDistributor {
       // `chunk` is passed in rather than re-read from the round: the fetcher may
       // null the field at any time after the boundary, and this range was
       // reserved before that could happen.
-      def runClaim(round: Round[E, A], chunk: Chunk[A], i: Int, until: Int): ZIO[R, Nothing, Unit] =
+      def runClaim(round: Round[E, A], chunk: Chunk[A], i: Int, until: Int, depth: Int): ZIO[R, Nothing, Unit] =
         f(chunk(i)).foldCauseZIO(
           onError,
           // Continue within the claim, or go back to the cursor once it is
           // exhausted. A failure ends this worker's loop exactly as in the
           // unbatched path: the rest of the claim is abandoned, which is what
           // fail-fast means here.
-          _ => if (i + 1 < until) runClaim(round, chunk, i + 1, until) else loop(round)
+          _ =>
+            if (i + 1 < until) runClaim(round, chunk, i + 1, until, depth + 1)
+            else loop(round, depth + 1)
         )
 
       // A `ZIO.whileLoop` version of this loop was implemented and reverted: it
@@ -309,11 +330,27 @@ private[methods] object ChunkCursorDistributor {
       // rebuilding that `whileLoop` avoids is evidently cheap enough for the
       // JIT to handle — consistent with hoisting the worker closures out of the
       // loop also measuring as a no-op. Don't retry either without a benchmark.
-      def loop(round: Round[E, A]): ZIO[R, Nothing, Unit] =
+      def loop(round: Round[E, A], depth: Int): ZIO[R, Nothing, Unit] =
         // A terminal round only signals "stop". The cause, if any, was already
         // reported once by the fetcher that pulled it, so workers arriving here
         // must not report it again.
         if (round.terminal) Exit.unit
+        // Trampoline. `foldCauseZIO` on an already-completed `Exit` runs its
+        // continuation *inline* rather than returning to the ZIO interpreter, so
+        // when `f` does not suspend — `Exit.unit`, `ZIO.succeed`, any pure
+        // computation — the whole `loop`/`runClaim` cycle is ordinary JVM
+        // recursion and the stack grows with the round, not with the claim.
+        // `MaxStride` bounds a single claim at 16; it does not bound this.
+        // Measured before the fix: a single 200k-element chunk with a no-op `f`
+        // overflows a 512KB stack, and the error escapes as a fiber defect.
+        //
+        // `suspendSucceed` returns control to the interpreter, which unwinds the
+        // stack and resumes from the returned effect. It is cheaper than
+        // `yieldNow`, which would additionally force a scheduling round-trip.
+        // The counter resets on every trampoline, so this costs one extra effect
+        // node per `TrampolineEvery` elements and nothing on a suspending `f`,
+        // where the chain never builds up in the first place.
+        else if (depth >= TrampolineEvery) ZIO.suspendSucceed(loop(round, 0))
         else {
           // Read the chunk once. A drained round's `chunk` is nulled by the
           // fetcher, and a worker can re-enter `loop` on such a round; reading
@@ -334,8 +371,8 @@ private[methods] object ChunkCursorDistributor {
             // covers a single element, so it goes straight to `f` and skips
             // `runClaim`'s range bookkeeping entirely — that path is then exactly
             // the pre-batching loop.
-            if (stride == 1) f(chunk(i)).foldCauseZIO(onError, _ => loop(round))
-            else runClaim(round, chunk, i, (i + stride) min length)
+            if (stride == 1) f(chunk(i)).foldCauseZIO(onError, _ => loop(round, depth + 1))
+            else runClaim(round, chunk, i, (i + stride) min length, depth)
           // Fetcher election. At stride 1 the bases are consecutive, so exactly
           // one worker lands on `length` and the implicit test elects it with no
           // atomic of its own — the original protocol, unchanged. Only a stride
@@ -368,15 +405,15 @@ private[methods] object ChunkCursorDistributor {
                   // is what keeps the run moving, and after it is published no
                   // worker can claim from this round again. This is what stops
                   // the seed round from transitively pinning the whole stream.
-                  publish(round, nextRound) *> ZIO.succeed(release(round)) *> loop(nextRound)
+                  publish(round, nextRound) *> ZIO.succeed(release(round)) *> loop(nextRound, 0)
                 }
               )
             }
           else
             // Someone else is fetching; wait for the published round.
-            round.next.await.flatMap(loop)
+            round.next.await.flatMap(loop(_, 0))
         }
 
-      ZIO.foreachParDiscard(1 to n)(_ => loop(seed)).withParallelism(n)
+      ZIO.foreachParDiscard(1 to n)(_ => loop(seed, 0)).withParallelism(n)
     }
 }
