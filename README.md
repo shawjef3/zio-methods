@@ -7,7 +7,7 @@ ZIO fork rather than merged upstream. Depends on `dev.zio %% zio-streams %
 ## What's here
 
 - `runForeachPar` — added to `ZStream` as an extension method
-  (`me.jeffshaw.zio.methods.ZStreamMethods`). Consumes all elements, running up
+  (`me.jeffshaw.zio.stream.ZStreamMethods`). Consumes all elements, running up
   to `n` invocations of `f` concurrently, without emitting results downstream.
   Semantics match `mapZIOParUnordered`: up to `n` concurrent, unordered, results
   discarded, first failure interrupts the rest and fails fast.
@@ -352,7 +352,7 @@ real I/O is far past it.
 
 ## Layout
 
-- `methods` (root) — the library + `zio-test` spec.
+- `stream` (root) — the library + `zio-test` spec.
 - `benchmarks` — JMH subproject (sbt-jmh), ZIO-only benchmarks (the
   Akka/fs2/cats-effect comparisons from the original ZIO benchmark were
   dropped).

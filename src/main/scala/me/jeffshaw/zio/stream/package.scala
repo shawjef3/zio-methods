@@ -20,7 +20,7 @@ import zio._
 import zio.stream.{Take, ZStream}
 import zio.stacktracer.TracingImplicits.disableAutoTrace
 
-package object methods {
+package object stream {
 
   /**
    * Adds `runForeachPar` to [[zio.stream.ZStream]] as an extension method,

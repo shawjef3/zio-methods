@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package me.jeffshaw.zio.methods
+package me.jeffshaw.zio.stream
 
 import zio._
 import zio.stream.Take
@@ -95,7 +95,7 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
  * are linearized: the claimed ranges partition `[0, length)`, so no index is
  * handed out twice and none is skipped.
  */
-private[methods] object ChunkCursorDistributor {
+private[stream] object ChunkCursorDistributor {
 
   /**
    * How many consecutive elements a worker may run before returning control to

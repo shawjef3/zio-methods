@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package me.jeffshaw.zio.methods
+package me.jeffshaw.zio.stream
 
 import org.openjdk.jmh.annotations.{Scope => JScope, _}
 import zio._
@@ -22,7 +22,7 @@ import zio.stream._
 
 import java.util.concurrent.TimeUnit
 
-import me.jeffshaw.zio.methods.BenchmarkUtil._
+import me.jeffshaw.zio.stream.BenchmarkUtil._
 
 /**
  * Locates the `f` cost at which parallelism starts paying, so the README's

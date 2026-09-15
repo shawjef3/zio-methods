@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package me.jeffshaw.zio.methods
+package me.jeffshaw.zio.stream
 
 import zio._
 import zio.stream.Take
