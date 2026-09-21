@@ -358,6 +358,41 @@ object RunForeachParSpec extends ZIOSpecDefault {
           } yield assertTrue(res == total)
         effect.provide(Counter.layer)
       } @@ nonFlaky(20),
+      test("a worker blocked in f is interrupted by another worker's failure") {
+        // Fail-fast must not depend on the blocked worker ever becoming
+        // runnable again. `blocked` is a promise that nothing in this test ever
+        // completes, so the only way the run can terminate is by interrupting
+        // worker B where it is parked.
+        //
+        // This pins the topology, not just the outcome: all `n` workers live
+        // under the single `workerFiber`, so interrupting the losing side of
+        // `workerFiber.join.raceFirst(errorSignal.await)` reaches them.
+        // `ZChannel#mapOutZIOParUnordered` needs an explicit `scope.close` in
+        // its `awaitErrorSignal` for the same guarantee, because there the
+        // raced effect is a forked pull loop that does not own the per-element
+        // fibers. A refactor toward that shape here must keep this green.
+        //
+        // The ordering is forced rather than raced for: B parks before A is
+        // allowed to fail, so B is guaranteed to be in-flight when the failure
+        // fires. Distinct from "interrupts pending tasks when one of the tasks
+        // fails" above, which releases nothing but also asserts nothing about
+        // the run terminating unaided.
+        for {
+          parked  <- Promise.make[Nothing, Unit]
+          blocked <- Promise.make[Nothing, Unit]
+          failNow <- Promise.make[Nothing, Unit]
+          ran     <- Ref.make(0)
+          exit <- ZStream(1, 2)
+                    .runForeachPar(2) {
+                      case 1 => parked.await *> failNow.await *> ZIO.fail("boom")
+                      case _ => parked.succeed(()) *> blocked.await *> ran.update(_ + 1)
+                    }
+                    .exit
+                    .fork
+                    .flatMap(fiber => parked.await *> failNow.succeed(()) *> fiber.join)
+          res <- ran.get
+        } yield assert(exit)(fails(equalTo("boom"))) && assertTrue(res == 0)
+      } @@ TestAspect.jvmOnly @@ nonFlaky(50),
       test("fail-fast after terminal failure round") {
         // A failure must promptly short-circuit the run even when it arrives
         // as a terminal round after successful elements.
