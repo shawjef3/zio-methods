@@ -45,7 +45,7 @@ lazy val methods = (project in file("."))
   .settings(javaTarget)
   .settings(
     name               := "zstream-methods",
-    description        := "Methods for ZStream.",
+    description        := "Stream combinators built on ZIO, extracted from a ZIO fork rather than merged upstream.",
     crossScalaVersions := Seq(Scala212, Scala213, Scala3),
     libraryDependencies ++= Seq(
       "dev.zio" %% "zio-streams"       % zioVersion,
