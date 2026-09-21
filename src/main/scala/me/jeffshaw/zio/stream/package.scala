@@ -1,5 +1,5 @@
 /*
- * Copyright 2027 Jeffrey Shaw
+ * Copyright 2026 Jeffrey Shaw
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -104,26 +104,15 @@ package object stream {
               // level — matching `mapZIOParUnordered` — without a chunk boundary
               // barrier, and without the per-element `Exit.Success` boxing of an
               // element-granular queue.
-              queue       <- Queue.bounded[Take[E, A]](bufferSizeV)
-              _           <- scope.addFinalizer(queue.shutdown)
-              childScope  <- scope.fork
-              errorSignal <- Promise.make[Nothing, Unit]
-              fiberId     <- ZIO.fiberId
-              failure      = Ref.unsafe.make[Cause[E1]](Cause.empty)(Unsafe)
-              // `Promise#succeedUnit` is `private[zio]`; it exists only to skip
-              // the `Exit` allocation of `succeed(())`. `Exit.unit` is a
-              // singleton, so `done(Exit.unit)` is the allocation-free public
-              // equivalent. This runs once per failure, not per element.
-              // An interruption-only cause is not recorded, matching
-              // `ZChannel#mapOutZIOParUnordered`. Interruption is normally the
-              // *consequence* of the failure that is already being recorded —
-              // fail-fast interrupts the other workers — so folding it in would
-              // bury the real cause under the interrupts it triggered. The
-              // error signal still fires, so the run still stops.
-              fail = (cause: Cause[E1]) =>
-                       (if (cause.isInterruptedOnly) Exit.unit
-                        else ZIO.succeed(failure.unsafe.update(_ && cause)(Unsafe))) *>
-                         errorSignal.done(Exit.unit).unit
+              queue      <- Queue.bounded[Take[E, A]](bufferSizeV)
+              _          <- scope.addFinalizer(queue.shutdown)
+              childScope <- scope.fork
+              fiberId    <- ZIO.fiberId
+              // Holds whether the run failed, why, and the fail-fast signal, as
+              // one mechanism. See `FailureAccumulator` for the invariants that
+              // keeping them together enforces, in particular that an
+              // interruption-only cause fires the signal without being recorded.
+              failures <- FailureAccumulator.make[E1]
               // Producer: feed the stream's chunks into the queue as `Take`s,
               // terminated by `Take.end` on end-of-stream or `Take.failCause` on
               // error.
@@ -141,21 +130,15 @@ package object stream {
               // worker that finishes an element immediately claims the next, so
               // there is no barrier between chunks; a single chunk keeps all `n`
               // workers busy.
-              worker = ChunkCursorDistributor.run[R1, E, E1, A](nn, fetch, f, fail)
+              worker = ChunkCursorDistributor.run[R1, E, E1, A](nn, fetch, f, failures.record)
               workerFiber <- worker.forkIn(childScope)
-              // Wait for the workers to finish, unless a failure fires
-              // `errorSignal` first, in which case interrupt them.
-              _ <- workerFiber.join.raceFirst(errorSignal.await)
+              // Wait for the workers to finish, unless a failure signals
+              // fail-fast first, in which case interrupt them.
+              _ <- workerFiber.join.raceFirst(failures.await)
               _ <- childScope.close(Exit.interrupt(fiberId))
-              // `errorSignal` decides *whether* the run failed; `failure` holds
-              // *why*. They differ for an interruption-only cause, which fires
-              // the signal but is deliberately not recorded: the run must still
-              // fail, with an empty cause, exactly as the base combinator does.
-              errored <- errorSignal.isDone
-              cause    = failure.unsafe.get(Unsafe)
-              _ <-
-                if (!errored) Exit.unit
-                else Exit.failCause(cause)
+              // `Exit.unit` when the run never failed, otherwise the accumulated
+              // cause, which is empty for an interruption-only failure.
+              _ <- failures.result.flatten
             } yield ()
           }
       }
