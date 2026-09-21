@@ -131,54 +131,12 @@ package object stream {
                      .runIntoQueueScoped(queue)
                      .provideSomeEnvironment[R1](_.add[Scope](childScope))
                      .forkIn(childScope)
-              // Batched fetch: the designated fetcher drains every chunk already
-              // buffered (at least one; `takeBetween(1, max)` suspends only when
-              // the queue is empty) and fuses them into a single `Take`, so one
-              // round spans up to `bufferSize` chunks instead of one.
-              //
-              // Why: when `n` is much larger than the chunk size, a round has
-              // fewer elements than workers, and every round publish wakes all
-              // overflow workers at once to race for the next chunk — measured
-              // at ~28% of throughput at n = 16k-40k with 2000-element chunks
-              // (5ms IO-like `f`). Fusing multiplies elements per round by the
-              // number of buffered chunks, making the wake-herd boundary
-              // proportionally rarer, while dispatch stays element-granular so
-              // load balance and the concurrency contract are unchanged. When
-              // the queue holds a single chunk (the n <= chunkSize regime),
-              // `fuse` returns it as-is and no copy is made.
-              //
-              // A terminal `Take` inside the batch is split off and parked in
-              // `pendingTerminal`, to be delivered by the *next* fetch after the
-              // fused data round drains. Visibility: only the designated fetcher
-              // (unique per round, by cursor construction) touches it, and
-              // successive fetchers are ordered by the round handoff; the
-              // `AtomicReference` makes that independent of those details.
-              batchMax = bufferSizeV max 1
-              // Holds the terminal `Take`'s underlying `Exit` (`Take` is an
-              // `AnyVal`, so the reference stores the boxed exit instead).
-              pendingTerminal = new java.util.concurrent.atomic.AtomicReference[Exit[Option[E], Chunk[A]]](null)
-              fetch = ZIO.suspendSucceed {
-                        val parked = pendingTerminal.get
-                        if (parked ne null) Exit.succeed(Take(parked))
-                        else
-                          queue.takeBetween(1, batchMax).map { takes =>
-                            def fuse(data: Chunk[Take[E, A]]): Take[E, A] =
-                              if (data.length == 1) data.head
-                              else
-                                Take.chunk(data.flatMap(_.exit match {
-                                  case Exit.Success(chunk) => chunk
-                                  case _                   => Chunk.empty // unreachable: terminals are split off below
-                                }))
-
-                            val terminalIndex = takes.indexWhere(!_.exit.isSuccess)
-                            if (terminalIndex < 0) fuse(takes)
-                            else if (terminalIndex == 0) takes.head
-                            else {
-                              pendingTerminal.set(takes(terminalIndex).exit)
-                              fuse(takes.take(terminalIndex))
-                            }
-                          }
-                      }
+              // Batched fetch: one round spans every chunk already buffered
+              // rather than exactly one, which keeps the round boundary rare,
+              // along with the wake-herd it causes when `n` exceeds the chunk size.
+              // See `BatchingFetch` for why, and for the terminal parking that
+              // makes a batch containing end-of-stream safe. Built once per run.
+              fetch = BatchingFetch.effect[E, A](queue, bufferSizeV)
               // `n` workers claim elements from the shared cursor and apply `f`. A
               // worker that finishes an element immediately claims the next, so
               // there is no barrier between chunks; a single chunk keeps all `n`
