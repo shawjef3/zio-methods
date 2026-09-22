@@ -77,8 +77,19 @@ import java.util.concurrent.atomic.AtomicReference
  *     informative one: it isolates the loss to `Concat.apply`'s per-element
  *     tree descent replacing a flat array read, not to the copy.
  *
- * So eliminating the copy is not the win it looks like, and any future attempt
- * here needs to keep the fused round a flat chunk.
+ * A third attempt went the other way: skip fusing when the head chunk is
+ * already large enough to be a round on its own (`n * 8` elements), on the
+ * theory that the copy then buys nothing. It lost by 26-61% wherever it
+ * engaged, worst at `n = 64` with 512-element chunks. That is the informative
+ * direction: a lone 512-element chunk gives 64 workers eight elements each, so
+ * the round boundary — a promise completion and up to `n - 1` worker wakes —
+ * arrives every eight elements per worker, and fusing sixteen chunks makes it
+ * sixteen times rarer. The losses scale with `n`, which is the wake-herd
+ * signature.
+ *
+ * So the copy is cheap and the round boundary is expensive, and all three
+ * results agree on that ordering. Any future attempt here needs to keep the
+ * fused round a flat chunk, and to fuse at least as eagerly as this does.
  */
 private[stream] final class BatchingFetch[E, A] private (
   queue: Queue[Take[E, A]],
