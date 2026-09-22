@@ -85,19 +85,45 @@ at `n = 2250` with 500-element chunks that is 16–32, not thousands.
 Two ceilings cap this regardless of the arithmetic. The queue only ever holds
 what the producer has actually produced — `takeBetween` returns immediately
 with whatever is there, so raising `bufferSize` past what the source can stay
-ahead of buys nothing. And the benefit is making round boundaries rarer, so
-going from one round per worker-pass to four matters and from forty to a
-hundred and sixty does not.
+ahead of buys nothing. Measured with a producer-limited source, the curve is
+flat from `bufferSize = 4` on (+2.9% then +3.1%, both inside error), against
+3.8× across the same range when the producer is free.
+
+And the benefit is making round boundaries rarer, which runs out quickly. With
+a free producer, 64-element chunks and `n = 4`:
+
+| `bufferSize` | ops/s | step |
+|---|---|---|
+| 1 | 70.7 ± 2.5 | — |
+| 4 | 123.2 ± 4.0 | +74% |
+| 16 | 252.3 ± 24.9 | +105% |
+| 64 | 268.8 ± 21.1 | +6.5% |
+
+The knee is at 16, not at the first doubling: the largest single step is 4 → 16.
+Past 16 the gains are within the error bars, so the default of 16 is where this
+stops paying on an in-memory source.
 
 **Should you `rechunk` first?** Usually no. Dispatch is element-granular, so a
 single chunk of `≥ n` elements already saturates all `n` workers — chunk size
 matters far less here than in a combinator where a worker owns a whole chunk.
-It is worth rechunking only when the source emits pathologically small chunks
-(one element per callback, say) *and* `chunkSize × bufferSize < n`. Even then,
-raising `bufferSize` is the cheaper fix, because `rechunk` copies every element
-and, on a slow source, adds latency while it waits to fill a chunk. Chunks
-already in the hundreds — what a Kafka consumer or a JDBC cursor typically
-yields — want no reshaping at all.
+It is worth rechunking when the source emits pathologically small chunks — one
+element per callback, say. There `rechunk` is the fix, and raising `bufferSize`
+is not: measured at one element per chunk with `n = 4`, `rechunk(512)` is 3.5×
+`asIs` (14.6 ± 0.4 vs 4.1 ± 0.2 ops/s) while `bufferSize = 256` gains 2%, inside
+its own error bar.
+
+That asymmetry follows from the ceiling above. `bufferSize` only caps how many
+chunks a fetch *may* fuse; it cannot conjure chunks the producer has not
+queued, and it never makes a chunk bigger. `rechunk` changes the chunks
+themselves, so it is the only one of the two that fixes chunk size. The copy it
+costs is real, and on a slow source it adds latency while it waits to fill a
+chunk, but at one element per chunk the per-round overhead it removes dwarfs
+both.
+
+Chunks already in the hundreds — what a Kafka consumer or a JDBC cursor
+typically yields — want no reshaping at all: at 64 and 512 elements per chunk,
+`asIs`, `rechunk` and a larger `bufferSize` are indistinguishable, their forks
+disagreeing by more than the variants do.
 
 All of this is dispatch tuning, and dispatch stops being what governs
 throughput once `f` is slow — see the next section before spending time here.
@@ -150,7 +176,13 @@ dispatch tuning can do.
   with whichever was first. Match on the cause accordingly.
 - **`n <= 0` degrades to sequential** `runForeach`, ignoring `bufferSize`.
   `n == 1` does *not*: it keeps the worker topology, so the stream is still
-  consumed concurrently with `f`.
+  consumed concurrently with `f`. That topology is not free, and its payoff is
+  unverified: measured against `runForeach`, `n == 1` costs 2.0× with a free
+  producer and 1.33× with a CPU-bound one, and with a parked producer — where
+  the overlap should pay — the two tied inside error. The benchmark that found
+  no benefit was timer-dominated and ran on 4 cores, so this is "no regime found
+  where it wins", not "no such regime exists". Prefer `runForeach` for `n == 1`
+  unless you have measured your own producer.
 
 ## Design
 
@@ -285,6 +317,14 @@ Measured on 32 cores, JMH throughput mode. Scores below are ± the JMH error ove
 several forks; the `n = 4` benchmarks in particular vary enough fork to fork that
 single-fork runs are not comparable — read them across forks or not at all.
 
+The numbers in "Sizing `bufferSize` and chunks", in the `rechunk` and `n == 1`
+notes, and the `n` sweep in the crossover section come from a later run on a
+**4-core** host instead, so they are not comparable to the figures in this
+section and are quoted only against each other. Where that run and this one
+overlap they agree on direction, not magnitude: the sequential penalty below the
+crossover measured 1.6–2.0× there against the ~1.5× quoted below, which the core
+count plausibly explains.
+
 Combinator overhead, 500k elements, no-op `f`, `n = 4` (`StreamParBenchmark`):
 
 | Approach | ops/s |
@@ -344,6 +384,15 @@ keeps growing past it — it is bounded by cores, so with `n = 4` it tends towar
 4×. Below the crossover the penalty is real but bounded, hovering around 1.5×
 rather than growing.
 
+**That crossover is for `n = 4`, and it moves with `n`.** Sweeping `n` on a
+4-core host at 1,000 iterations, parallel is 1.04× sequential at `n = 4` but
+only 0.75× at `n = 2` and 0.93× at `n = 32` — so at the same `f` cost, the
+well-matched `n` has crossed over and the other two have not. Under-provisioning
+leaves work on the table; over-provisioning adds coordination the cores cannot
+absorb. Both push the crossover to the right, so read the table as "the
+crossover for a well-matched `n`", and expect a worse one if `n` is far from
+the core count for CPU-bound `f`.
+
 These are iteration counts, not times: attempts to calibrate them to nanoseconds
 were defeated by the JIT hoisting the loop, so treat the column as an ordinal
 scale on this machine. The practical reading is that a few hundred arithmetic
@@ -359,9 +408,19 @@ real I/O is far past it.
   - `StreamParBenchmark` — combinator overhead against alternatives, plus
     slow-upstream and blocking-upstream regression guards.
   - `CrossoverBenchmark` — `runForeachPar` vs. sequential `runForeach` across a
-    sweep of `f` costs, locating where parallelism starts paying.
+    sweep of `f` costs and of `n`, locating where parallelism starts paying.
   - `RealisticParBenchmark` — high-concurrency IO-like `f`, with a stream-free
     control benchmark for the runtime ceiling.
+  - `FetchPathBenchmark` — the per-round `fetch` path in isolation, swept over
+    chunk size so that per-round cost scales against a fixed element count.
+  - `BufferSizeBenchmark` — `bufferSize` against producer speed, for the
+    diminishing-returns and "past what the source sustains" claims above.
+  - `ChunkShapeBenchmark` — `rechunk` vs. leaving the source alone vs. a larger
+    `bufferSize`, across source chunk sizes.
+  - `GroupedBatchBenchmark` — the `grouped(k).runForeachPar(n)` idiom against an
+    unbatched control doing the same total work.
+  - `SingleWorkerBenchmark` — `n == 1` against `runForeach` across free, CPU-bound
+    and parked producers, with `n == 0` as a delegation control.
 
 ## Running
 

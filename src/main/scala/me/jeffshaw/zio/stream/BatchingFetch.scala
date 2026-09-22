@@ -52,6 +52,33 @@ import java.util.concurrent.atomic.AtomicReference
  * One instance is built per run, and [[effect]] is likewise built once: a fetch
  * costs the `suspendSucceed` node, the parked-terminal read, the `takeBetween`,
  * and the fusing, and allocates nothing else per round.
+ *
+ * Fusing is the common case, not an edge case. It is tempting to read
+ * "`takeBetween` suspends only when the queue is empty" as implying that
+ * workers outrun an in-memory producer and each fetch therefore sees one chunk;
+ * measurement says otherwise. Instrumenting the batch size a fetch observes,
+ * with a no-op `f` over `ZStream.fromChunks` and the default `bufferSize` of
+ * 16, 52-96% of fetches saw two or more chunks, averaging 3-14. The producer
+ * refills the queue while the workers drain a multi-chunk round, so the steady
+ * state is a populated queue even when `f` is free.
+ *
+ * [[fuse]] is therefore on the hot path, and its `flatMap` is not an accident.
+ * `ChunkLike.flatMap` collects the source chunks, allocates one
+ * `Array.ofDim(total)`, and fills it with one bulk `System.arraycopy` per
+ * chunk, yielding the flat array that `Dispatcher.loop`'s per-element
+ * `chunk(i)` wants. Two alternatives were implemented and measured against
+ * `FetchPathBenchmark`, and both lost badly enough to revert:
+ *
+ *   - a hand-rolled `ChunkBuilder` sized in one pass: -58% at 512-element
+ *     chunks, because it appends through the builder instead of bulk-copying;
+ *   - `++`, which copies nothing and links the chunks into a `Chunk.Concat`
+ *     tree: -47% at 512-element chunks, and still -8 to -13% at one element per
+ *     chunk where there is nearly nothing to copy. That last point is the
+ *     informative one: it isolates the loss to `Concat.apply`'s per-element
+ *     tree descent replacing a flat array read, not to the copy.
+ *
+ * So eliminating the copy is not the win it looks like, and any future attempt
+ * here needs to keep the fused round a flat chunk.
  */
 private[stream] final class BatchingFetch[E, A] private (
   queue: Queue[Take[E, A]],
