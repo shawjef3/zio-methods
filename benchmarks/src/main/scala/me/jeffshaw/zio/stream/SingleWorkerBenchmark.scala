@@ -39,13 +39,14 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * (cost with nothing to overlap) and *win* when the producer is slow enough
  * that the overlap covers it.
  *
- * `producerParks` is the axis that decides it, and it matters for the same
- * reason `StreamParBenchmark` keeps both a slow and a blocking upstream: an
- * on-CPU producer and a parked one behave differently. With only 4 cores on the
- * measurement host, a CPU-bound producer overlapping a CPU-bound `f` competes
- * for the same core and the overlap is partly fictional, whereas a parked
- * producer genuinely leaves the core to `f`. Measuring both is what separates
- * "the topology overlaps I/O" from "the topology overlaps computation".
+ * `producer` is the axis that decides it, and it distinguishes three shapes for
+ * the same reason `StreamParBenchmark` keeps both a slow and a blocking
+ * upstream: an on-CPU producer and a parked one behave differently. On a
+ * core-constrained host a CPU-bound producer overlapping a CPU-bound `f`
+ * competes for the same core, so the overlap is partly fictional, whereas a
+ * parked producer genuinely leaves the core to `f`. Measuring both is what
+ * separates "the topology overlaps I/O" from "the topology overlaps
+ * computation".
  *
  * `runForeachParN1` vs `runForeachSequential` is the comparison; `n == 0` is
  * included as a control, since it is documented to delegate to `runForeach` and
@@ -57,7 +58,7 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
 @OutputTimeUnit(TimeUnit.SECONDS)
 @Measurement(iterations = 5, timeUnit = TimeUnit.SECONDS, time = 1)
 @Warmup(iterations = 5, timeUnit = TimeUnit.SECONDS, time = 1)
-@Fork(value = 3)
+@Fork(value = 2)
 class SingleWorkerBenchmark {
 
   @Param(Array("50000"))
@@ -67,26 +68,32 @@ class SingleWorkerBenchmark {
   var chunkSize: Int = _
 
   /**
-   * Per-chunk producer cost in multiply-add iterations. 0 is the free in-memory
-   * source, where the topology has nothing to overlap and should be pure
-   * overhead; 2000 makes the producer the limiting stage.
+   * The producer shape, as one parameter rather than a cost/parks cross: with
+   * two parameters, every `parks` value at zero cost names the same
+   * configuration, and JMH would measure that duplicate as if it were a
+   * distinct point.
+   *
+   *   - `free`   — in-memory source. The topology has nothing to overlap, so
+   *                `n == 1` should be pure overhead against `runForeach`.
+   *   - `onCpu`  — per-chunk spin. Overlap exists but competes for the same
+   *                core, which on a 4-core host makes it partly fictional.
+   *   - `parked` — per-chunk `ZIO.sleep`. The producer genuinely yields the
+   *                core, so this is where the claimed overlap should pay.
    */
-  @Param(Array("0", "2000"))
-  var producerCost: Int = _
+  @Param(Array("free", "onCpu", "parked"))
+  var producer: String = _
 
   /**
-   * Whether the producer's cost is spent parked or on-CPU. Parked is the shape
-   * where the overlap is real on a core-constrained host; on-CPU is where it
-   * competes with `f`. Ignored when `producerCost` is 0.
+   * Per-chunk spin iterations for the `onCpu` producer. Calibrated by
+   * `StreamParBenchmark` to make the producer the limiting stage.
    */
-  @Param(Array("true", "false"))
-  var producerParks: Boolean = _
+  @Param(Array("2000"))
+  var onCpuIters: Int = _
 
   /**
-   * How long a parked producer sleeps per chunk. Set well above timer
+   * How long the `parked` producer sleeps per chunk. Set well above timer
    * granularity so the score reflects the requested wait rather than the
-   * scheduler's resolution. Only used when `producerParks` and `producerCost`
-   * is non-zero.
+   * scheduler's resolution.
    */
   @Param(Array("200"))
   var parkedSleepMicros: Long = _
@@ -129,20 +136,23 @@ class SingleWorkerBenchmark {
    */
   private def source: ZStream[Any, Nothing, Int] = {
     val base = ZStream.fromChunks(chunks: _*)
-    if (producerCost == 0) base
-    else if (producerParks)
-      base.mapChunksZIO(chunk => ZIO.sleep(Duration.fromNanos(parkedSleepMicros * 1000L)).as(chunk))
-    else
-      base.mapChunks { chunk =>
-        var acc = chunk.length
-        var i = 0
-        while (i < producerCost) {
-          acc = acc * 31 + i
-          i += 1
+    producer match {
+      case "free" => base
+      case "parked" =>
+        base.mapChunksZIO(chunk => ZIO.sleep(Duration.fromNanos(parkedSleepMicros * 1000L)).as(chunk))
+      case "onCpu" =>
+        base.mapChunks { chunk =>
+          var acc = chunk.length
+          var i = 0
+          while (i < onCpuIters) {
+            acc = acc * 31 + i
+            i += 1
+          }
+          sink = acc.toLong
+          chunk
         }
-        sink = acc.toInt
-        chunk
-      }
+      case other => throw new IllegalArgumentException(s"unknown producer shape: $other")
+    }
   }
 
   @Benchmark

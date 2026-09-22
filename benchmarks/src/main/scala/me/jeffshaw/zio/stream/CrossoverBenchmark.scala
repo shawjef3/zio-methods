@@ -51,8 +51,15 @@ class CrossoverBenchmark {
   @Param(Array("50"))
   var chunkSize: Int = _
 
-  /** Per-element work in the callback, in multiply-add iterations. */
-  @Param(Array("0", "10", "50", "200", "1000", "5000"))
+  /**
+   * Per-element work in the callback, in multiply-add iterations.
+   *
+   * 10 and 50 are dropped from the original sweep: they sit inside the flat
+   * region below the crossover, where the README claims nothing beyond
+   * "sequential wins", and the four remaining points already bracket the
+   * crossover on both sides.
+   */
+  @Param(Array("0", "200", "1000", "5000"))
   var fCostIters: Int = _
 
   /**
@@ -63,7 +70,7 @@ class CrossoverBenchmark {
    * Sweeping `n` is what turns the table into a claim about the combinator
    * rather than about one configuration of it.
    */
-  @Param(Array("2", "4", "8", "32"))
+  @Param(Array("2", "4", "32"))
   var n: Int = _
 
   var zioChunks: IndexedSeq[Chunk[Int]] = _

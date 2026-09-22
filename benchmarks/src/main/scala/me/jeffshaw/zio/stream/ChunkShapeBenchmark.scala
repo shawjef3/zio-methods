@@ -25,76 +25,51 @@ import java.util.concurrent.TimeUnit
 import me.jeffshaw.zio.stream.BenchmarkUtil._
 
 /**
- * Tests the README's advice about reshaping the stream before handing it to
- * `runForeachPar`: the `grouped` idiom it recommends, and the `rechunk` it
- * mostly advises against.
+ * Tests the README's advice against `rechunk`:
  *
- * Both are claims about what a *caller* should write, which is why they belong
- * in one benchmark: the alternatives have to be measured against each other on
- * the same source, not each against a different baseline.
+ *   "Usually no [...] It is worth rechunking only when the source emits
+ *   pathologically small chunks (one element per callback, say) *and*
+ *   `chunkSize * bufferSize < n`. Even then, raising `bufferSize` is the
+ *   cheaper fix, because `rechunk` copies every element."
  *
- * == The `grouped` idiom ==
+ * Two separable claims, and `sourceChunkSize` is the axis for both.
+ * `rechunked` against `asIs` asks whether the copy ever pays for itself;
+ * `asIsLargeBuffer` against `rechunked` asks whether the claimed cheaper fix is
+ * in fact cheaper, on the same source. At `sourceChunkSize = 512` the README
+ * predicts `rechunked` is a pure loss, and at 1 it predicts the opposite
+ * ordering, with `asIsLargeBuffer` ahead.
  *
- * The README recommends `stream.grouped(k).runForeachPar(n)(batch => ...)` to
- * get batching and concurrency together, and calls it "the one people reach
- * for". It is worth measuring because `grouped` emits one *element* per batch,
- * and the resulting stream's chunks are small — the shape
- * `FetchPathBenchmark` identifies as the pathological one for per-round cost.
- * So the recommended idiom may land in the worst dispatch regime, which is
- * exactly what a reader following the advice needs to know.
+ * `n` is pinned: the advice is about repairing chunk shape, and the condition
+ * it names (`chunkSize * bufferSize < n`) is moved here by `sourceChunkSize`
+ * and `bufferSize`, both of which vary, rather than by `n`.
  *
- * `groupedRechunked` adds a `rechunk` after the `grouped`, which is the
- * mitigation the README's rechunk section would imply; `ungrouped` is the
- * control that does the same total per-element work with no batching at all,
- * establishing what the batching costs or saves in dispatch terms alone.
- *
- * To keep the comparison honest, all three do the same total work: `f` costs
- * `perElementCost` iterations per *element*, so a batch of `groupSize` costs
- * `groupSize` times as much. Only the dispatch shape differs.
- *
- * == `rechunk` ==
- *
- * "Usually no [...] worth rechunking only when the source emits pathologically
- * small chunks and `chunkSize * bufferSize < n`. Even then, raising
- * `bufferSize` is the cheaper fix."
- *
- * `sourceChunkSize` is the axis: 1 is the pathological callback-driven source,
- * 512 is a source that wants no reshaping. `rechunked` vs `asIs` measures
- * whether the copy pays for itself, and `asIsLargeBuffer` tests the "raising
- * `bufferSize` is the cheaper fix" half against the same source. At
- * `sourceChunkSize = 512` the README predicts `rechunked` is a pure loss.
+ * `f` costs `perElementCost` iterations per element, just above the crossover,
+ * so parallelism is paying and dispatch is still visible. A no-op `f` would
+ * make this a pure dispatch measurement and say nothing about the advice as a
+ * caller would experience it.
  */
 @State(JScope.Benchmark)
 @BenchmarkMode(Array(Mode.Throughput))
 @OutputTimeUnit(TimeUnit.SECONDS)
 @Measurement(iterations = 5, timeUnit = TimeUnit.SECONDS, time = 1)
 @Warmup(iterations = 5, timeUnit = TimeUnit.SECONDS, time = 1)
-@Fork(value = 3)
+@Fork(value = 2)
 class ChunkShapeBenchmark {
 
   @Param(Array("200000"))
   var totalElements: Int = _
 
   /**
-   * The chunk size the source emits. 1 is the pathological case the README
-   * names; 512 is a JDBC-cursor-shaped source it says to leave alone.
+   * The chunk size the source emits. 1 is the pathological callback-driven
+   * case the README names; 512 is a JDBC-cursor-shaped source it says to leave
+   * alone; 64 sits between them.
    */
   @Param(Array("1", "64", "512"))
   var sourceChunkSize: Int = _
 
-  /** Batch size for the `grouped` idiom, matching the README's example. */
-  @Param(Array("100"))
-  var groupSize: Int = _
-
-  @Param(Array("4", "32"))
+  @Param(Array("4"))
   var n: Int = _
 
-  /**
-   * Per-element work in multiply-add iterations, chosen to sit just above the
-   * crossover so parallelism is paying and dispatch is still visible. A no-op
-   * `f` would make every variant a pure dispatch measurement and tell us
-   * nothing about the batching advice, which is about amortizing real work.
-   */
   @Param(Array("200"))
   var perElementCost: Int = _
 
@@ -107,36 +82,13 @@ class ChunkShapeBenchmark {
 
   @volatile var sink: Long = 0
 
-  private def burn(seed: Long, iterations: Int): Long = {
-    var acc = seed
-    var iter = 0
-    while (iter < iterations) {
-      acc = acc * 6364136223846793005L + 1442695040888963407L
-      iter += 1
-    }
-    acc
-  }
-
-  /** Per-element `f`. */
-  private val fElement: Int => ZIO[Any, Nothing, Any] = { i =>
+  private val f: Int => ZIO[Any, Nothing, Any] = { i =>
     ZIO.succeed {
-      val acc = burn(i.toLong, perElementCost)
-      sink = acc
-      acc
-    }
-  }
-
-  /**
-   * Per-batch `f`, costing `perElementCost` per element in the batch, so a run
-   * over the whole stream does the same total work as `fElement` does.
-   */
-  private val fBatch: Chunk[Int] => ZIO[Any, Nothing, Any] = { batch =>
-    ZIO.succeed {
-      var acc = 0L
-      var idx = 0
-      while (idx < batch.length) {
-        acc = burn(acc + batch(idx).toLong, perElementCost)
-        idx += 1
+      var acc = i.toLong
+      var iter = 0
+      while (iter < perElementCost) {
+        acc = acc * 6364136223846793005L + 1442695040888963407L
+        iter += 1
       }
       sink = acc
       acc
@@ -145,46 +97,17 @@ class ChunkShapeBenchmark {
 
   private def source: ZStream[Any, Nothing, Int] = ZStream.fromChunks(chunks: _*)
 
-  // --- The `grouped` idiom -------------------------------------------------
-
-  /** The README's recommended shape for batching with concurrency. */
-  @Benchmark
-  def groupedBatched: Long = {
-    unsafeRun(source.grouped(groupSize).runForeachPar(n)(fBatch))
-    totalElements.toLong
-  }
-
-  /**
-   * The same idiom with the small chunks `grouped` produces repaired, which is
-   * what the rechunk section would suggest for a source shaped like this.
-   */
-  @Benchmark
-  def groupedBatchedRechunked: Long = {
-    unsafeRun(source.grouped(groupSize).rechunk(64).runForeachPar(n)(fBatch))
-    totalElements.toLong
-  }
-
-  // --- `rechunk` ------------------------------------------------------------
-
-  /**
-   * The source as it comes, default `bufferSize`.
-   *
-   * Serves both groups: it is the "usually no" baseline for the rechunk claim,
-   * and the no-batching control for the `grouped` idiom — identical total work,
-   * so the gap to `groupedBatched` is what the batching shape costs or saves in
-   * dispatch alone. (The real-world payoff of batching, fewer round trips, is
-   * not something an in-memory benchmark can model.)
-   */
+  /** The source as it comes, default `bufferSize`. The "usually no" baseline. */
   @Benchmark
   def asIs: Long = {
-    unsafeRun(source.runForeachPar(n)(fElement))
+    unsafeRun(source.runForeachPar(n)(f))
     totalElements.toLong
   }
 
   /** Pay the copy to repair chunk size. */
   @Benchmark
   def rechunked: Long = {
-    unsafeRun(source.rechunk(512).runForeachPar(n)(fElement))
+    unsafeRun(source.rechunk(512).runForeachPar(n)(f))
     totalElements.toLong
   }
 
@@ -194,7 +117,7 @@ class ChunkShapeBenchmark {
    */
   @Benchmark
   def asIsLargeBuffer: Long = {
-    unsafeRun(source.runForeachPar(n, 256)(fElement))
+    unsafeRun(source.runForeachPar(n, 256)(f))
     totalElements.toLong
   }
 }

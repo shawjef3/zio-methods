@@ -33,8 +33,8 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  *
  *   1. "going from one round per worker-pass to four matters and from forty to
  *      a hundred and sixty does not" — i.e. the return on `bufferSize` is steeply
- *      diminishing. The sweep is geometric (1, 4, 16, 64, 256) so the early and
- *      late doublings are directly comparable.
+ *      diminishing. The sweep is geometric (1, 4, 16, 64) so the early and late
+ *      steps are the same multiple and directly comparable.
  *   2. "the queue only ever holds what the producer has actually produced [...]
  *      so raising `bufferSize` past what the source can stay ahead of buys
  *      nothing" — which is a claim about the *interaction* with producer speed,
@@ -55,7 +55,7 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
 @OutputTimeUnit(TimeUnit.SECONDS)
 @Measurement(iterations = 5, timeUnit = TimeUnit.SECONDS, time = 1)
 @Warmup(iterations = 5, timeUnit = TimeUnit.SECONDS, time = 1)
-@Fork(value = 3)
+@Fork(value = 2)
 class BufferSizeBenchmark {
 
   /** Held constant so every point moves the same element count. */
@@ -70,10 +70,12 @@ class BufferSizeBenchmark {
   var chunkSize: Int = _
 
   /**
-   * Geometric, so "1 to 4" and "64 to 256" are the same multiple and the
-   * diminishing-returns claim is a comparison of like with like.
+   * Geometric, so "1 to 4" and "16 to 64" are the same multiple and the
+   * diminishing-returns claim is a comparison of like with like. Four points
+   * are enough for a claim about the *shape* of the curve: the first step
+   * prices the fusion path, the last tests whether the curve has flattened.
    */
-  @Param(Array("1", "4", "16", "64", "256"))
+  @Param(Array("1", "4", "16", "64"))
   var bufferSize: Int = _
 
   /**
@@ -85,7 +87,12 @@ class BufferSizeBenchmark {
   @Param(Array("0", "2000"))
   var producerCost: Int = _
 
-  @Param(Array("4", "32"))
+  /**
+   * Pinned: the claims under test are about `bufferSize` against producer
+   * speed, and `n` appears in neither. Sweeping it would multiply the point
+   * count without addressing either claim.
+   */
+  @Param(Array("4"))
   var n: Int = _
 
   var chunks: IndexedSeq[Chunk[Int]] = _
