@@ -110,6 +110,13 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         // "Exactly one worker observes the boundary value, by construction."
         // With one chunk plus a terminal, a correct run pulls exactly twice
         // regardless of n; a double election would pull more.
+        //
+        // This is also the sharpest guard on how the workers are started. All
+        // `n` of them begin on one shared, single-use seed round, so a start
+        // that lets the first worker run before the others exist makes each
+        // late arrival elect itself. The tell is `n + 1` calls: at n = 2 this
+        // reads 3 instead of 2. See the precondition on
+        // `ChunkCursorDistributor.run` before changing that call.
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to 100)), Take.end)
         checkAll(Gen.fromIterable(Chunk(2, 16, 128))) { n =>
           for {

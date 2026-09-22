@@ -40,6 +40,11 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   // implicit one: every worker's first claim lands at or past the end,
   // exactly one of them sees `i == 0 == length` and performs the initial
   // fetch, and the rest await the round it publishes.
+  //
+  // This is a single-use election point shared by all `n` workers, and it
+  // carries a precondition on how they are started. See
+  // `ChunkCursorDistributor.run`, which is the only thing allowed to start
+  // them: changing that call has broken the whole protocol before.
   val seed: Round[E, A] = Round.data[E, A](Chunk.empty, n)
 
   // Publishes the round the fetcher just built to the workers awaiting it.

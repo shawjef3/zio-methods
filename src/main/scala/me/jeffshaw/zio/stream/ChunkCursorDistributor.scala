@@ -115,6 +115,47 @@ private[stream] object ChunkCursorDistributor {
    *
    * The returned effect completes when every worker has observed a terminal
    * round.
+   *
+   * ==Starting the workers: a precondition, not an implementation detail==
+   *
+   * All `n` workers begin on the shared [[Dispatcher.seed]] round, which is a
+   * '''single-use election point''': it is already exhausted, so the one worker
+   * whose claim returns `i == 0` becomes the initial fetcher and every other
+   * worker awaits `seed.next`. That only holds while the seed is alive. Once
+   * the elected fetcher publishes and `release`s it, a worker arriving later
+   * finds a round it can neither claim from nor be elected on, and the run
+   * degenerates: each late arrival starts its own independent fetch/dispatch
+   * sequence instead of joining the shared one.
+   *
+   * So `foreachParDiscard` here is '''load-bearing''', not an arbitrary way to
+   * spell "run these `n` effects". Replacing it with a fork loop was attempted
+   * and reverted; four variants (`forkIn` inside `ZIO.scopedWith`, `fork`,
+   * `forkDaemon`, and a fork loop under `uninterruptibleMask`) each broke
+   * 35-50 of the 78 tests, with this signature:
+   *
+   *   - `fetch is invoked exactly once per round` at `n = 2`: 3 calls, not 2.
+   *   - `stops pulling once a terminal round is reached` at `n = 32`: 33, not 2.
+   *   - `a failure terminal is reported exactly once`: reported twice.
+   *   - `a single chunk keeps all n workers busy`: times out.
+   *
+   * `n + 1` fetches is the tell: every worker elected itself. The tests above
+   * are the regression guard, and they fail loudly rather than subtly, so the
+   * protocol is not silently at risk — but they diagnose the symptom, not the
+   * cause, which is why it is written down here.
+   *
+   * '''What exactly `foreachParDiscard` provides is not established.''' It is
+   * something about how ZIO's `foreachParUnboundedDiscard` (the branch taken
+   * here, since `parallelism == size`) schedules the forked children relative
+   * to the forking fiber; `uninterruptibleMask` alone does not reproduce it,
+   * and made matters worse. Anyone reworking this should not try to guess it.
+   *
+   * The robust fix, if this call ever needs to change — for instance to drop
+   * the `Chunk` of `n` `Fiber.Runtime`s that `foreachParUnboundedDiscard`
+   * retains for the whole run — is to '''remove the dependency''' rather than
+   * reproduce it: elect the initial fetcher by CAS on a dedicated flag instead
+   * of relying on `i == 0` being unique among workers that may arrive at
+   * different times. That makes startup order irrelevant, after which the
+   * worker-forking strategy is free.
    */
   def run[R, E <: E1, E1, A](
     n: Int,
@@ -129,6 +170,9 @@ private[stream] object ChunkCursorDistributor {
       // defs, `n`/`fetch`/`f`/`onError`/`trace` were lifted into every call's
       // argument list, including the per-element ones.
       val dispatcher = new Dispatcher[R, E, E1, A](n, fetch, f, onError)
+      // Load-bearing: the workers share a single-use election point, so this
+      // cannot be swapped for a fork loop without first making seed election
+      // tolerate late arrivals. See the precondition on this method.
       ZIO.foreachParDiscard(1 to n)(_ => dispatcher.loop(dispatcher.seed, 0)).withParallelism(n)
     }
 }
