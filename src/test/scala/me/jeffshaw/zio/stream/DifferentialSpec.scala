@@ -98,13 +98,6 @@ object DifferentialSpec extends ZIOSpecDefault {
   }
 
   /**
-   * Runs `scenario` under both implementations and asserts the outcomes agree.
-   *
-   * `scenario` receives a `record` callback to wrap around whatever `f` it
-   * builds, and a `run` that applies the combinator under test at the requested
-   * parallelism. Each side gets a fresh `Ref`, so the two runs never share state.
-   */
-  /**
    * Drops occurrence counts, keeping only which failures and defects appeared.
    *
    * Needed when more than one invocation of `f` can fail concurrently: how many
@@ -119,6 +112,19 @@ object DifferentialSpec extends ZIOSpecDefault {
       defects = o.defects.map { case (k, _) => (k, 1) }
     )
 
+  /**
+   * Runs `stream` under both implementations at the requested parallelism and
+   * asserts the outcomes agree.
+   *
+   * `f` receives a `record` callback to wrap around whatever effect it builds,
+   * so the elements each side visited are observable. Each side gets a fresh
+   * `Ref`, so the two runs never share state.
+   *
+   * `countFailures` keeps occurrence counts in the comparison; see
+   * [[dropCounts]] for when they have to be dropped. `elements`, when non-empty,
+   * bounds what either side may have visited, checked only on the fail-fast path
+   * where the visited set itself is scheduling-dependent.
+   */
   private def equivalent(
     n: Int,
     bufferSize: Int,
