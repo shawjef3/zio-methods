@@ -127,46 +127,24 @@ private[stream] object ChunkCursorDistributor {
    * degenerates: each late arrival starts its own independent fetch/dispatch
    * sequence instead of joining the shared one.
    *
-   * So `foreachParDiscard` here is '''load-bearing''', not an arbitrary way to
-   * spell "run these `n` effects". Replacing it with a fork loop was attempted
-   * and reverted; four variants (`forkIn` inside `ZIO.scopedWith`, `fork`,
-   * `forkDaemon`, and a fork loop under `uninterruptibleMask`) each broke
-   * 35-50 of the 78 tests, with this signature:
+   * How the workers are forked therefore matters. Forking them as '''daemons'''
+   * breaks this: with `forkDaemon`, every worker reaches `fetch` instead of one
+   * (measured at 2 of 2, 8 of 8, 32 of 32 with a terminal-only script), the
+   * fetch count becomes `n + 1`, a failure terminal is reported once per
+   * worker, and `a single chunk keeps all n workers busy` times out. Four
+   * hand-written fork loops were tried and reverted before the cause was
+   * isolated, so the symptom is worth recognizing:
    *
    *   - `fetch is invoked exactly once per round` at `n = 2`: 3 calls, not 2.
    *   - `stops pulling once a terminal round is reached` at `n = 32`: 33, not 2.
    *   - `a failure terminal is reported exactly once`: reported twice.
-   *   - `a single chunk keeps all n workers busy`: times out.
    *
-   * `n + 1` fetches is the tell: every worker elected itself. The tests above
-   * are the regression guard, and they fail loudly rather than subtly, so the
-   * protocol is not silently at risk — but they diagnose the symptom, not the
-   * cause, which is why it is written down here.
-   *
-   * '''What exactly `foreachParDiscard` provides is not established.''' A
-   * standalone probe narrowed it without settling it. With a terminal-only
-   * script, where exactly one fetch is correct, a fork loop has '''every'''
-   * worker reach `fetch` (2 of 2, 8 of 8, 32 of 32) while `foreachParDiscard`
-   * has exactly one — so election fails outright, not intermittently, and no
-   * data round need exist for it to happen. The probe ruled out the obvious
-   * candidates: the seed is a single shared instance
-   * (`identityHashCode` is constant across workers), and claiming from its
-   * cursor directly across `n` fibers returns `0..n-1` exactly once each, so
-   * only `i == 0` should elect.
-   *
-   * That leaves a genuine contradiction — sampling the cursor directly and
-   * running the same claim through `loop` disagree — and it is unresolved.
-   * `uninterruptibleMask` alone does not reproduce what `foreachParDiscard`
-   * provides, and made matters worse. Anyone reworking this should measure
-   * rather than reason: the contradiction above is where to start.
-   *
-   * The robust fix, if this call ever needs to change — for instance to drop
-   * the `Chunk` of `n` `Fiber.Runtime`s that `foreachParUnboundedDiscard`
-   * retains for the whole run — is to '''remove the dependency''' rather than
-   * reproduce it: elect the initial fetcher by CAS on a dedicated flag instead
-   * of relying on `i == 0` being unique among workers that may arrive at
-   * different times. That makes startup order irrelevant, after which the
-   * worker-forking strategy is free.
+   * [[zio.MethodsWorkerPool]] is what starts them now, forking into the calling
+   * fiber's scope rather than the global one. It was derived by copying ZIO's
+   * `foreachParUnboundedDiscard` verbatim — the implementation
+   * `foreachParDiscard` resolved to here — and removing one piece at a time
+   * with the suite run after each, which is what identified `forkDaemon` as the
+   * part that mattered. See that class for what the copy drops and why.
    */
   def run[R, E <: E1, E1, A](
     n: Int,
@@ -181,9 +159,8 @@ private[stream] object ChunkCursorDistributor {
       // defs, `n`/`fetch`/`f`/`onError`/`trace` were lifted into every call's
       // argument list, including the per-element ones.
       val dispatcher = new Dispatcher[R, E, E1, A](n, fetch, f, onError)
-      // Load-bearing: the workers share a single-use election point, so this
-      // cannot be swapped for a fork loop without first making seed election
-      // tolerate late arrivals. See the precondition on this method.
-      ZIO.foreachParDiscard(1 to n)(_ => dispatcher.loop(dispatcher.seed, 0)).withParallelism(n)
+      // The workers share a single-use election point, which forking them as
+      // daemons breaks. See the precondition on this method.
+      _root_.zio.MethodsWorkerPool.replicate(n)(dispatcher.loop(dispatcher.seed, 0))
     }
 }
