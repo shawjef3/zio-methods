@@ -45,12 +45,12 @@ object RetentionSpec extends ZIOSpecDefault {
     val filler = new Array[Byte](1024)
   }
 
-  private val total    = 20000
-  private val chunkSz  = 100
+  private val total = 20000
+  private val chunkSz = 100
   private val sampleOf = 100
   // Blocking on the final element keeps the run in flight after every earlier
   // element has been processed.
-  private val blockAt  = total - 1
+  private val blockAt = total - 1
 
   private def source =
     ZStream.unfoldChunk(0) { i =>
@@ -69,21 +69,21 @@ object RetentionSpec extends ZIOSpecDefault {
     consume: (Payload => ZIO[Any, Nothing, Any]) => ZIO[Any, Any, Any]
   ): ZIO[Any, Any, (Int, Int)] =
     for {
-      refs    <- Ref.make(List.empty[WeakReference[Payload]])
+      refs <- Ref.make(List.empty[WeakReference[Payload]])
       blocked <- Promise.make[Nothing, Unit]
       release <- Promise.make[Nothing, Unit]
       f = (p: Payload) =>
-            if (p.id == blockAt) blocked.succeed(()) *> release.await
-            else if (p.id % sampleOf == 0) refs.update(new WeakReference(p) :: _)
-            else ZIO.unit
+        if (p.id == blockAt) blocked.succeed(()) *> release.await
+        else if (p.id % sampleOf == 0) refs.update(new WeakReference(p) :: _)
+        else ZIO.unit
       fiber <- consume(f).fork
-      _     <- blocked.await
+      _ <- blocked.await
       // Let the remaining workers finish everything they can.
-      _     <- ZIO.sleep(500.millis)
-      _     <- ZIO.succeed { java.lang.System.gc(); Thread.sleep(300); java.lang.System.gc() }
-      rs    <- refs.get
-      alive  = rs.count(_.get() != null)
-      _     <- release.succeed(()) *> fiber.interrupt
+      _ <- ZIO.sleep(500.millis)
+      _ <- ZIO.succeed { java.lang.System.gc(); Thread.sleep(300); java.lang.System.gc() }
+      rs <- refs.get
+      alive = rs.count(_.get() != null)
+      _ <- release.succeed(()) *> fiber.interrupt
     } yield (rs.size, alive)
 
   def spec =
@@ -101,8 +101,8 @@ object RetentionSpec extends ZIOSpecDefault {
       } @@ TestAspect.withLiveClock @@ TestAspect.timeout(60.seconds),
       test("retention does not grow with n") {
         for {
-          one   <- reachableDuringRun(f => source.runForeachPar(1, 16)(f))
-          many  <- reachableDuringRun(f => source.runForeachPar(512, 16)(f))
+          one <- reachableDuringRun(f => source.runForeachPar(1, 16)(f))
+          many <- reachableDuringRun(f => source.runForeachPar(512, 16)(f))
         } yield assertTrue(one._2 <= chunkSz, many._2 <= chunkSz)
       } @@ TestAspect.withLiveClock @@ TestAspect.timeout(60.seconds),
       test("matches the retention of the combinators it replaces") {
@@ -111,10 +111,10 @@ object RetentionSpec extends ZIOSpecDefault {
           par <- reachableDuringRun(f => source.mapZIOParUnordered(64)(p => f(p)).runDrain)
           ours <- reachableDuringRun(f => source.runForeachPar(64, 16)(f))
           _ <- ZIO.succeed(
-                 println(
-                   s"[retention] runForeach=${seq._2} mapZIOParUnordered=${par._2} runForeachPar=${ours._2} (of ${ours._1} sampled)"
-                 )
-               )
+            println(
+              s"[retention] runForeach=${seq._2} mapZIOParUnordered=${par._2} runForeachPar=${ours._2} (of ${ours._1} sampled)"
+            )
+          )
           // Not worse than the baselines by more than a chunk.
         } yield assertTrue(ours._2 <= seq._2 + chunkSz, ours._2 <= par._2 + chunkSz)
       } @@ TestAspect.withLiveClock @@ TestAspect.timeout(60.seconds)

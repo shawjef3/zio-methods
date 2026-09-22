@@ -95,22 +95,22 @@ object StackSafetySpec extends ZIOSpecDefault {
         val chunk = Chunk.fromArray(Array.tabulate(200000)(identity))
         for {
           escaped <- runOnSmallStack(
-                       ZStream
-                         .fromChunks(chunk)
-                         .runForeachPar(4)(i => if (i == 150000) ZIO.fail("boom") else Exit.unit)
-                         .either
-                     )
+            ZStream
+              .fromChunks(chunk)
+              .runForeachPar(4)(i => if (i == 150000) ZIO.fail("boom") else Exit.unit)
+              .either
+          )
         } yield assertTrue(!escaped.exists(isStackOverflow))
       },
       test("every element still runs exactly once across the trampoline") {
         // The trampoline resets a counter and re-enters `loop`; it must not skip
         // or repeat an element at the boundary.
-        val size  = 20000
+        val size = 20000
         val chunk = Chunk.fromArray(Array.tabulate(size)(identity))
         for {
           seen <- Ref.make(Set.empty[Int])
-          _    <- ZStream.fromChunks(chunk).runForeachPar(8)(i => seen.update(_ + i))
-          s    <- seen.get
+          _ <- ZStream.fromChunks(chunk).runForeachPar(8)(i => seen.update(_ + i))
+          s <- seen.get
         } yield assertTrue(s.size == size)
       }
     ) @@ TestAspect.timeout(120.seconds)

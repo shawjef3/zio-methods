@@ -20,7 +20,6 @@ import zio._
 import zio.stream.Take
 import zio.stacktracer.TracingImplicits.disableAutoTrace
 
-
 /**
  * The dispatch loop for one run, holding the state it is parameterized by.
  *
@@ -166,7 +165,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
       // fetcher, and a worker can re-enter `loop` on such a round; reading
       // into a local keeps the length checks and the element read consistent
       // with each other regardless of when that happens.
-      val chunk  = round.chunk
+      val chunk = round.chunk
       val length = if (chunk eq null) 0 else chunk.length
       val stride = round.stride
       // One claim reserves the half-open range [i, i + stride). At stride 1

@@ -194,7 +194,7 @@ class StreamParBenchmark {
   private def slowUpstream(s: ZStream[Any, Nothing, Int]): ZStream[Any, Nothing, Int] =
     s.mapChunks { chunk =>
       var acc = chunk.length
-      var i   = 0
+      var i = 0
       while (i < upstreamCost) {
         acc = acc * 31 + i
         i += 1
@@ -255,10 +255,10 @@ class StreamParBenchmark {
       for {
         q <- Queue.bounded[Take[Nothing, Int]](bufferChunks)
         producer = ZIO.foreachDiscard(zioChunks) { chunk =>
-                     val offer = q.offer(Take.chunk(chunk))
-                     if (producerDelayNanos == 0L) offer
-                     else ZIO.sleep(Duration.fromNanos(producerDelayNanos)) *> offer
-                   } *> q.offer(Take.end)
+          val offer = q.offer(Take.chunk(chunk))
+          if (producerDelayNanos == 0L) offer
+          else ZIO.sleep(Duration.fromNanos(producerDelayNanos)) *> offer
+        } *> q.offer(Take.end)
         _ <- producer.forkScoped
       } yield ZStream.fromQueue(q).flattenTake
     }

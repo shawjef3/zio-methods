@@ -31,7 +31,7 @@ object RunForeachParSpec extends ZIOSpecDefault {
         checkN(10)(Gen.small(Gen.listOfN(_)(Gen.byte))) { data =>
           for {
             ref <- Ref.make(Set.empty[Byte])
-            _   <- ZStream.fromIterable(data).runForeachPar(8)(a => ref.update(_ + a))
+            _ <- ZStream.fromIterable(data).runForeachPar(8)(a => ref.update(_ + a))
             res <- ref.get
           } yield assert(res)(equalTo(data.toSet))
         }
@@ -43,36 +43,36 @@ object RunForeachParSpec extends ZIOSpecDefault {
       test("propagates error of original stream") {
         for {
           fiber <- (ZStream(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) ++ ZStream.fail(new Throwable("Boom")))
-                     .runForeachPar(2)(_ => ZIO.sleep(1.second))
-                     .fork
-          _    <- TestClock.adjust(5.seconds)
+            .runForeachPar(2)(_ => ZIO.sleep(1.second))
+            .fork
+          _ <- TestClock.adjust(5.seconds)
           exit <- fiber.await
         } yield assert(exit)(fails(hasMessage(equalTo("Boom"))))
       },
       test("interruption propagation") {
         for {
           interrupted <- Ref.make(false)
-          latch       <- Promise.make[Nothing, Unit]
+          latch <- Promise.make[Nothing, Unit]
           fib <- ZStream(())
-                   .runForeachPar(1)(_ => (latch.succeed(()) *> ZIO.never).onInterrupt(interrupted.set(true)))
-                   .fork
-          _      <- latch.await
-          _      <- fib.interrupt
+            .runForeachPar(1)(_ => (latch.succeed(()) *> ZIO.never).onInterrupt(interrupted.set(true)))
+            .fork
+          _ <- latch.await
+          _ <- fib.interrupt
           result <- interrupted.get
         } yield assert(result)(isTrue)
       },
       test("interrupts pending tasks when one of the tasks fails") {
         for {
           interrupted <- Ref.make(0)
-          latch1      <- Promise.make[Nothing, Unit]
-          latch2      <- Promise.make[Nothing, Unit]
+          latch1 <- Promise.make[Nothing, Unit]
+          latch2 <- Promise.make[Nothing, Unit]
           result <- ZStream(1, 2, 3)
-                      .runForeachPar(3) {
-                        case 1 => (latch1.succeed(()) *> ZIO.never).onInterrupt(interrupted.update(_ + 1))
-                        case 2 => (latch2.succeed(()) *> ZIO.never).onInterrupt(interrupted.update(_ + 1))
-                        case _ => latch1.await *> latch2.await *> ZIO.fail("Boom")
-                      }
-                      .exit
+            .runForeachPar(3) {
+              case 1 => (latch1.succeed(()) *> ZIO.never).onInterrupt(interrupted.update(_ + 1))
+              case 2 => (latch2.succeed(()) *> ZIO.never).onInterrupt(interrupted.update(_ + 1))
+              case _ => latch1.await *> latch2.await *> ZIO.fail("Boom")
+            }
+            .exit
           count <- interrupted.get
         } yield assert(count)(equalTo(2)) && assert(result)(fails(equalTo("Boom")))
       } @@ nonFlaky(500),
@@ -82,13 +82,13 @@ object RunForeachParSpec extends ZIOSpecDefault {
           for {
             latch <- CountdownLatch.make(parallelism + 1)
             f <- ZStream
-                   .range(0, iterations)
-                   .runForeachPar(parallelism)(_ => latch.countDown *> latch.await)
-                   .fork
-            _     <- Live.live(latch.count.delay(100.micros)).repeatUntil(_ == 1)
-            _     <- latch.countDown
+              .range(0, iterations)
+              .runForeachPar(parallelism)(_ => latch.countDown *> latch.await)
+              .fork
+            _ <- Live.live(latch.count.delay(100.micros)).repeatUntil(_ == 1)
+            _ <- latch.countDown
             count <- latch.count
-            _     <- f.join
+            _ <- f.join
           } yield assertTrue(count == 0)
         }
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
@@ -101,8 +101,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
         for {
           latch <- CountdownLatch.make(parallelism)
           _ <- ZStream
-                 .fromChunk(Chunk.fromIterable(1 to parallelism))
-                 .runForeachPar(parallelism)(_ => latch.countDown *> latch.await)
+            .fromChunk(Chunk.fromIterable(1 to parallelism))
+            .runForeachPar(parallelism)(_ => latch.countDown *> latch.await)
         } yield assertCompletes
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("fetcher election: every element visited exactly once under many small chunks") {
@@ -115,20 +115,20 @@ object RunForeachParSpec extends ZIOSpecDefault {
         val expected = chunks.flatten.toSet
         for {
           ref <- Ref.make(Set.empty[Int])
-          _   <- ZStream.fromChunks(chunks: _*).runForeachPar(64)(a => ref.update(_ + a))
+          _ <- ZStream.fromChunks(chunks: _*).runForeachPar(64)(a => ref.update(_ + a))
           res <- ref.get
         } yield assert(res)(equalTo(expected))
       } @@ nonFlaky(50),
       test("terminal end mid-flight: no element dropped, all workers finish") {
         // End-of-stream arrives while workers are mid-element. No preceding
         // element may be dropped, and the run must terminate.
-        val n     = 32
+        val n = 32
         val total = 2000
         for {
           count <- Ref.make(0)
           _ <- ZStream
-                 .range(0, total)
-                 .runForeachPar(n)(_ => count.update(_ + 1))
+            .range(0, total)
+            .runForeachPar(n)(_ => count.update(_ + 1))
           res <- count.get
         } yield assertTrue(res == total)
       } @@ nonFlaky(50),
@@ -140,8 +140,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
         for {
           counts <- Ref.make(Map.empty[Int, Int])
           _ <- ZStream
-                 .range(0, total)
-                 .runForeachPar(32)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+            .range(0, total)
+            .runForeachPar(32)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
           res <- counts.get
         } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
       } @@ nonFlaky(20),
@@ -156,8 +156,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
         for {
           counts <- Ref.make(Map.empty[Int, Int])
           _ <- ZStream
-                 .fromChunks(chunks.toSeq: _*)
-                 .runForeachPar(64)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+            .fromChunks(chunks.toSeq: _*)
+            .runForeachPar(64)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
           res <- counts.get
         } yield assertTrue(res.size == expected.length) && assertTrue(res.values.forall(_ == 1))
       } @@ nonFlaky(50),
@@ -170,8 +170,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
           for {
             counts <- Ref.make(Map.empty[Int, Int])
             _ <- ZStream
-                   .range(0, total, chunkSize = 8)
-                   .runForeachPar(16, bufferSize)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+              .range(0, total, chunkSize = 8)
+              .runForeachPar(16, bufferSize)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
             res <- counts.get
           } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
         }
@@ -184,27 +184,27 @@ object RunForeachParSpec extends ZIOSpecDefault {
         // no element may be dropped, and the run must still terminate.
         val total = 64
         for {
-          gate     <- Promise.make[Nothing, Unit]
+          gate <- Promise.make[Nothing, Unit]
           produced <- Promise.make[Nothing, Unit]
-          counts   <- Ref.make(Map.empty[Int, Int])
+          counts <- Ref.make(Map.empty[Int, Int])
           fiber <- ZStream
-                     .range(0, total, chunkSize = 4)
-                     // Fires as the producer emits the final element, so the
-                     // wait below is deterministic rather than a timing guess.
-                     // `ensuring` would deadlock here: it runs at scope close,
-                     // which cannot happen until the gated workers finish.
-                     .tap(a => produced.succeed(()).when(a == total - 1))
-                     .runForeachPar(4, 1024) { a =>
-                       // Hold every worker until the producer has pushed the
-                       // whole stream, terminal included, into the queue.
-                       gate.await *> counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1))
-                     }
-                     .fork
+            .range(0, total, chunkSize = 4)
+            // Fires as the producer emits the final element, so the
+            // wait below is deterministic rather than a timing guess.
+            // `ensuring` would deadlock here: it runs at scope close,
+            // which cannot happen until the gated workers finish.
+            .tap(a => produced.succeed(()).when(a == total - 1))
+            .runForeachPar(4, 1024) { a =>
+              // Hold every worker until the producer has pushed the
+              // whole stream, terminal included, into the queue.
+              gate.await *> counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1))
+            }
+            .fork
           // The producer is unblocked (bufferSize far exceeds the chunk count),
           // so it runs to completion before the workers are released.
-          _   <- produced.await
-          _   <- gate.succeed(())
-          _   <- fiber.join
+          _ <- produced.await
+          _ <- gate.succeed(())
+          _ <- fiber.join
           res <- counts.get
         } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
@@ -212,15 +212,15 @@ object RunForeachParSpec extends ZIOSpecDefault {
         // Same as above, but the terminal is a failure rather than
         // end-of-stream: it must survive being parked and still fail the run.
         for {
-          gate     <- Promise.make[Nothing, Unit]
+          gate <- Promise.make[Nothing, Unit]
           produced <- Promise.make[Nothing, Unit]
           fiber <- (ZStream.range(0, 64, chunkSize = 4).tap(a => produced.succeed(()).when(a == 63)) ++
-                     ZStream.fail("boom"))
-                     .runForeachPar(4, 1024)(_ => gate.await)
-                     .exit
-                     .fork
-          _    <- produced.await
-          _    <- gate.succeed(())
+            ZStream.fail("boom"))
+            .runForeachPar(4, 1024)(_ => gate.await)
+            .exit
+            .fork
+          _ <- produced.await
+          _ <- gate.succeed(())
           exit <- fiber.join
         } yield assert(exit)(fails(equalTo("boom")))
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
@@ -237,8 +237,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
         for {
           latch <- CountdownLatch.make(2)
           exit <- ZStream(1, 2)
-                    .runForeachPar(2)(a => latch.countDown *> latch.await *> ZIO.fail(s"boom-$a"))
-                    .exit
+            .runForeachPar(2)(a => latch.countDown *> latch.await *> ZIO.fail(s"boom-$a"))
+            .exit
           failures = exit.causeOption.toList.flatMap(_.failures)
         } yield assertTrue(failures.nonEmpty) &&
           assertTrue(failures.toSet.subsetOf(Set("boom-1", "boom-2")))
@@ -254,13 +254,13 @@ object RunForeachParSpec extends ZIOSpecDefault {
           for {
             latch <- CountdownLatch.make(2)
             exit <- ZStream(1, 2)
-                      .runForeachPar(2)(a => latch.countDown *> latch.await *> ZIO.fail(s"boom-$a"))
-                      .exit
+              .runForeachPar(2)(a => latch.countDown *> latch.await *> ZIO.fail(s"boom-$a"))
+              .exit
           } yield exit.causeOption.toList.flatMap(_.failures).toSet
         for {
           seen <- ZIO.iterate((Set.empty[String], 0))(s => s._1 != Set("boom-1", "boom-2") && s._2 < 200) {
-                    case (_, attempts) => attempt.map(fs => (fs, attempts + 1))
-                  }
+            case (_, attempts) => attempt.map(fs => (fs, attempts + 1))
+          }
         } yield assertTrue(seen._1 == Set("boom-1", "boom-2"))
       } @@ TestAspect.jvmOnly,
       test("empty stream completes") {
@@ -268,8 +268,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
         // `Take`; every worker must converge to termination with no element.
         for {
           visited <- Ref.make(0)
-          _       <- ZStream.empty.runForeachPar(8)(_ => visited.update(_ + 1))
-          res     <- visited.get
+          _ <- ZStream.empty.runForeachPar(8)(_ => visited.update(_ + 1))
+          res <- visited.get
         } yield assertTrue(res == 0)
       } @@ nonFlaky(20),
       test("non-positive n consumes the stream sequentially, in order") {
@@ -278,8 +278,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
         checkAll(Gen.fromIterable(Chunk(-1, 0))) { n =>
           for {
             visited <- Ref.make(Chunk.empty[Int])
-            _       <- ZStream.range(0, 100).runForeachPar(n)(a => visited.update(_ :+ a))
-            res     <- visited.get
+            _ <- ZStream.range(0, 100).runForeachPar(n)(a => visited.update(_ :+ a))
+            res <- visited.get
           } yield assertTrue(res == Chunk.fromIterable(0 until 100))
         }
       },
@@ -291,8 +291,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
           for {
             counts <- Ref.make(Map.empty[Int, Int])
             _ <- ZStream
-                   .range(0, total, chunkSize = 8)
-                   .runForeachPar(1, bufferSize)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+              .range(0, total, chunkSize = 8)
+              .runForeachPar(1, bufferSize)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
             res <- counts.get
           } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
         }
@@ -303,14 +303,14 @@ object RunForeachParSpec extends ZIOSpecDefault {
         // violation, so track the observed maximum overlap.
         for {
           inFlight <- Ref.make(0)
-          maxSeen  <- Ref.make(0)
+          maxSeen <- Ref.make(0)
           _ <- ZStream
-                 .range(0, 200, chunkSize = 8)
-                 .runForeachPar(1) { _ =>
-                   ZIO.acquireReleaseWith(
-                     inFlight.updateAndGet(_ + 1).flatMap(c => maxSeen.update(_ max c))
-                   )(_ => inFlight.update(_ - 1))(_ => ZIO.yieldNow)
-                 }
+            .range(0, 200, chunkSize = 8)
+            .runForeachPar(1) { _ =>
+              ZIO.acquireReleaseWith(
+                inFlight.updateAndGet(_ + 1).flatMap(c => maxSeen.update(_ max c))
+              )(_ => inFlight.update(_ - 1))(_ => ZIO.yieldNow)
+            }
           res <- maxSeen.get
         } yield assertTrue(res == 1)
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
@@ -322,28 +322,28 @@ object RunForeachParSpec extends ZIOSpecDefault {
         // if pulling and `f` share one fiber.
         for {
           pulled <- Ref.make(0)
-          gate   <- Promise.make[Nothing, Unit]
+          gate <- Promise.make[Nothing, Unit]
           fiber <- ZStream
-                     .range(0, 100, chunkSize = 1)
-                     .tap(_ => pulled.update(_ + 1))
-                     .runForeachPar(1, 8)(_ => gate.await)
-                     .fork
+            .range(0, 100, chunkSize = 1)
+            .tap(_ => pulled.update(_ + 1))
+            .runForeachPar(1, 8)(_ => gate.await)
+            .fork
           // Wait until the producer has run ahead of the blocked `f`.
-          _   <- pulled.get.repeatUntil(_ > 1)
+          _ <- pulled.get.repeatUntil(_ > 1)
           res <- pulled.get
-          _   <- gate.succeed(())
-          _   <- fiber.join
+          _ <- gate.succeed(())
+          _ <- fiber.join
         } yield assertTrue(res > 1)
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("a defect in the callback is not swallowed") {
         // `Cause.empty` is the sentinel for a clean end-of-stream, and defects
         // travel the same `foldCauseZIO` path as typed failures.
-        val boom   = new RuntimeException("die")
+        val boom = new RuntimeException("die")
         val effect = ZStream.range(0, 100).runForeachPar(8)(_ => ZIO.die(boom))
         assertZIO(effect.exit)(dies(equalTo(boom)))
       } @@ nonFlaky(20),
       test("a defect in the stream is not swallowed") {
-        val boom   = new RuntimeException("die")
+        val boom = new RuntimeException("die")
         val effect = (ZStream.range(0, 100) ++ ZStream.die(boom)).runForeachPar(8)(_ => ZIO.unit)
         assertZIO(effect.exit)(dies(equalTo(boom)))
       } @@ nonFlaky(20),
@@ -353,7 +353,7 @@ object RunForeachParSpec extends ZIOSpecDefault {
         val total = 100
         val effect =
           for {
-            _   <- ZStream.range(0, total).runForeachPar(8)(_ => ZIO.serviceWithZIO[Counter](_.increment))
+            _ <- ZStream.range(0, total).runForeachPar(8)(_ => ZIO.serviceWithZIO[Counter](_.increment))
             res <- ZIO.serviceWithZIO[Counter](_.get)
           } yield assertTrue(res == total)
         effect.provide(Counter.layer)
@@ -378,18 +378,18 @@ object RunForeachParSpec extends ZIOSpecDefault {
         // fails" above, which releases nothing but also asserts nothing about
         // the run terminating unaided.
         for {
-          parked  <- Promise.make[Nothing, Unit]
+          parked <- Promise.make[Nothing, Unit]
           blocked <- Promise.make[Nothing, Unit]
           failNow <- Promise.make[Nothing, Unit]
-          ran     <- Ref.make(0)
+          ran <- Ref.make(0)
           exit <- ZStream(1, 2)
-                    .runForeachPar(2) {
-                      case 1 => parked.await *> failNow.await *> ZIO.fail("boom")
-                      case _ => parked.succeed(()) *> blocked.await *> ran.update(_ + 1)
-                    }
-                    .exit
-                    .fork
-                    .flatMap(fiber => parked.await *> failNow.succeed(()) *> fiber.join)
+            .runForeachPar(2) {
+              case 1 => parked.await *> failNow.await *> ZIO.fail("boom")
+              case _ => parked.succeed(()) *> blocked.await *> ran.update(_ + 1)
+            }
+            .exit
+            .fork
+            .flatMap(fiber => parked.await *> failNow.succeed(()) *> fiber.join)
           res <- ran.get
         } yield assert(exit)(fails(equalTo("boom"))) && assertTrue(res == 0)
       } @@ TestAspect.jvmOnly @@ nonFlaky(50),
@@ -418,7 +418,7 @@ object RunForeachParSpec extends ZIOSpecDefault {
       ZLayer(Ref.make(0).map { ref =>
         new Counter {
           override def increment: UIO[Unit] = ref.update(_ + 1)
-          override def get: UIO[Int]        = ref.get
+          override def get: UIO[Int] = ref.get
         }
       })
   }

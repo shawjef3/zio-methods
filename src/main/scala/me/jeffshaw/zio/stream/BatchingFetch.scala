@@ -112,7 +112,7 @@ private[stream] object BatchingFetch {
     else
       Take.chunk(data.flatMap(_.exit match {
         case Exit.Success(chunk) => chunk
-        case _                   => Chunk.empty // unreachable: terminals are split off by `split`
+        case _ => Chunk.empty // unreachable: terminals are split off by `split`
       }))
 
   /** Builds the per-run fetcher over `queue`, batching up to `bufferSize` chunks. */

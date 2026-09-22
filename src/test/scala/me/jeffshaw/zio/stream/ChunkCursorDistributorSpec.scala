@@ -87,9 +87,9 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         checkAll(Gen.fromIterable(Chunk(1, 2, 8, 64))) { n =>
           for {
             visited <- Ref.make(0)
-            fetch   <- scripted[String, Int](Chunk(Take.end))
-            _       <- runWith(n, fetch)(_ => visited.update(_ + 1))
-            res     <- visited.get
+            fetch <- scripted[String, Int](Chunk(Take.end))
+            _ <- runWith(n, fetch)(_ => visited.update(_ + 1))
+            res <- visited.get
           } yield assertTrue(res == 0)
         }
       } @@ nonFlaky(20),
@@ -101,9 +101,9 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         val script = chunks.map(Take.chunk) :+ Take.end
         for {
           visited <- Ref.make(Vector.empty[Int])
-          fetch   <- scripted[String, Int](script)
-          _       <- runWith(64, fetch)(a => visited.update(_ :+ a))
-          res     <- visited.get
+          fetch <- scripted[String, Int](script)
+          _ <- runWith(64, fetch)(a => visited.update(_ :+ a))
+          res <- visited.get
         } yield assertTrue(res.sorted == Vector(1, 2, 3, 4, 5, 6))
       } @@ nonFlaky(50),
       test("fetch is invoked exactly once per round") {
@@ -115,8 +115,8 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
           for {
             fetchAndCount <- scriptedFetch[String, Int](script)
             (fetch, count) = fetchAndCount
-            _             <- runWith(n, fetch)(_ => ZIO.unit)
-            calls         <- count
+            _ <- runWith(n, fetch)(_ => ZIO.unit)
+            calls <- count
           } yield assertTrue(calls == script.length)
         }
       } @@ nonFlaky(50),
@@ -128,11 +128,11 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         for {
           fetchAndCount <- scriptedFetch[String, Int](script)
           (fetch, count) = fetchAndCount
-          _             <- runWith(32, fetch)(_ => ZIO.unit)
-          before        <- count
+          _ <- runWith(32, fetch)(_ => ZIO.unit)
+          before <- count
           // Give any still-running worker a chance to pull again; the count
           // must not move after the run has completed.
-          _     <- Live.live(ZIO.sleep(20.millis))
+          _ <- Live.live(ZIO.sleep(20.millis))
           after <- count
         } yield assertTrue(before == script.length) && assertTrue(after == before)
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
@@ -149,11 +149,11 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
             Take.end
           )
         for {
-          visited       <- Ref.make(Vector.empty[Int])
+          visited <- Ref.make(Vector.empty[Int])
           fetchAndCount <- scriptedFetch[String, Int](script)
           (fetch, count) = fetchAndCount
-          _     <- runWith(16, fetch)(a => visited.update(_ :+ a))
-          res   <- visited.get
+          _ <- runWith(16, fetch)(a => visited.update(_ :+ a))
+          res <- visited.get
           calls <- count
         } yield assertTrue(res.sorted == Vector(1, 2, 3)) && assertTrue(calls == script.length)
       } @@ nonFlaky(50),
@@ -164,9 +164,9 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         val script = Chunk(Take.chunk(Chunk(1, 2, 3)), Take.end)
         for {
           errors <- Ref.make(0)
-          fetch  <- scripted[String, Int](script)
-          _      <- runWith(16, fetch)(_ => ZIO.unit, _ => errors.update(_ + 1))
-          res    <- errors.get
+          fetch <- scripted[String, Int](script)
+          _ <- runWith(16, fetch)(_ => ZIO.unit, _ => errors.update(_ + 1))
+          res <- errors.get
         } yield assertTrue(res == 0)
       } @@ nonFlaky(50),
       test("a failure terminal is reported exactly once, whatever n is") {
@@ -178,9 +178,9 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         checkAll(Gen.fromIterable(Chunk(1, 2, 8, 64))) { n =>
           for {
             causes <- Ref.make(Vector.empty[Cause[String]])
-            fetch  <- scripted[String, Int](script)
-            _      <- runWith(n, fetch)(_ => ZIO.unit, c => causes.update(_ :+ c))
-            res    <- causes.get
+            fetch <- scripted[String, Int](script)
+            _ <- runWith(n, fetch)(_ => ZIO.unit, c => causes.update(_ :+ c))
+            res <- causes.get
           } yield assertTrue(res.length == 1) &&
             assertTrue(res.forall(_.failures == List("boom")))
         }
@@ -192,39 +192,39 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to 32)), Take.end)
         for {
           causes <- Ref.make(Vector.empty[Cause[String]])
-          fetch  <- scripted[String, Int](script)
+          fetch <- scripted[String, Int](script)
           _ <- runWith(4, fetch)(
-                 a => if (a % 2 == 0) ZIO.fail(s"odd-$a") else ZIO.unit,
-                 c => causes.update(_ :+ c)
-               )
+            a => if (a % 2 == 0) ZIO.fail(s"odd-$a") else ZIO.unit,
+            c => causes.update(_ :+ c)
+          )
           res <- causes.get
         } yield assertTrue(res.nonEmpty) && assertTrue(res.forall(_.failures.nonEmpty))
       } @@ nonFlaky(50),
       test("a callback defect is reported, not swallowed") {
-        val boom   = new RuntimeException("die")
+        val boom = new RuntimeException("die")
         val script = Chunk(Take.chunk(Chunk(1)), Take.end)
         for {
           causes <- Ref.make(Vector.empty[Cause[String]])
-          fetch  <- scripted[String, Int](script)
-          _      <- runWith(4, fetch)(_ => ZIO.die(boom), c => causes.update(_ :+ c))
-          res    <- causes.get
+          fetch <- scripted[String, Int](script)
+          _ <- runWith(4, fetch)(_ => ZIO.die(boom), c => causes.update(_ :+ c))
+          res <- causes.get
         } yield assertTrue(res.exists(_.defects == List(boom)))
       } @@ nonFlaky(50),
       test("a single chunk keeps all n workers busy at once") {
         // The design claim the cursor exists to satisfy: one chunk of >= n
         // elements must saturate all n workers. Each element blocks until every
         // worker has arrived, so the run completes only if they run together.
-        val n      = 16
+        val n = 16
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to n)), Take.end)
         for {
-          arrived    <- Ref.make(0)
+          arrived <- Ref.make(0)
           allArrived <- Promise.make[Nothing, Unit]
-          fetch      <- scripted[String, Int](script)
+          fetch <- scripted[String, Int](script)
           _ <- runWith(n, fetch)(_ =>
-                 arrived.updateAndGet(_ + 1).flatMap { count =>
-                   allArrived.succeed(()).when(count == n) *> allArrived.await
-                 }
-               )
+            arrived.updateAndGet(_ + 1).flatMap { count =>
+              allArrived.succeed(()).when(count == n) *> allArrived.await
+            }
+          )
         } yield assertCompletes
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("a chunk large enough to batch claims still keeps all n workers busy") {
@@ -235,19 +235,19 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         // several claims rather than exactly one — the property `ClaimsPerWorker`
         // exists to guarantee, and the one a stride sized to `length / n` would
         // lose.
-        val n      = 16
+        val n = 16
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to (n * 64))), Take.end)
         for {
-          arrived    <- Ref.make(0)
+          arrived <- Ref.make(0)
           allArrived <- Promise.make[Nothing, Unit]
-          fetch      <- scripted[String, Int](script)
+          fetch <- scripted[String, Int](script)
           _ <- runWith(n, fetch)(_ =>
-                 arrived.updateAndGet(_ + 1).flatMap { count =>
-                   // Only the first n elements gate on each other; the rest run
-                   // freely, so the run can finish once saturation is shown.
-                   allArrived.succeed(()).when(count == n) *> allArrived.await
-                 }
-               )
+            arrived.updateAndGet(_ + 1).flatMap { count =>
+              // Only the first n elements gate on each other; the rest run
+              // freely, so the run can finish once saturation is shown.
+              allArrived.succeed(()).when(count == n) *> allArrived.await
+            }
+          )
         } yield assertCompletes
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("claims partition the chunk at every length/n ratio") {
@@ -266,17 +266,17 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
           Gen.fromIterable(
             for {
               length <- Chunk(1, 7, 63, 64, 65, 1000, 1023)
-              n      <- Chunk(1, 2, 3, 16, 64)
+              n <- Chunk(1, 2, 3, 16, 64)
             } yield (length, n)
           )
         ) { case (length, n) =>
           val script = Chunk(Take.chunk(Chunk.fromIterable(1 to length)), Take.end)
           for {
-            counts        <- Ref.make(Map.empty[Int, Int])
+            counts <- Ref.make(Map.empty[Int, Int])
             fetchAndCount <- scriptedFetch[String, Int](script)
             (fetch, calls) = fetchAndCount
-            _       <- runWith(n, fetch)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
-            res     <- counts.get
+            _ <- runWith(n, fetch)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+            res <- counts.get
             fetches <- calls
           } yield assertTrue(res.size == length) &&
             assertTrue(res.values.forall(_ == 1)) &&
@@ -292,9 +292,9 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         val script = chunks.map(Take.chunk) :+ Take.end
         for {
           visited <- Ref.make(Vector.empty[Int])
-          fetch   <- scripted[String, Int](script)
-          _       <- runWith(1, fetch)(a => visited.update(_ :+ a))
-          res     <- visited.get
+          fetch <- scripted[String, Int](script)
+          _ <- runWith(1, fetch)(a => visited.update(_ :+ a))
+          res <- visited.get
         } yield assertTrue(res == Vector(1, 2, 3, 4, 5))
       } @@ nonFlaky(20),
       test("every element is claimed exactly once across many rounds") {
@@ -303,12 +303,12 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         // fetcher election happens constantly.
         val chunks = Chunk.fromIterable((0 until 200).map(i => Chunk(i, i + 1000)))
         val script = chunks.map(Take.chunk) :+ Take.end
-        val total  = chunks.map(_.length).sum
+        val total = chunks.map(_.length).sum
         for {
           counts <- Ref.make(Map.empty[Int, Int])
-          fetch  <- scripted[String, Int](script)
-          _      <- runWith(32, fetch)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
-          res    <- counts.get
+          fetch <- scripted[String, Int](script)
+          _ <- runWith(32, fetch)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+          res <- counts.get
         } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
       } @@ nonFlaky(50)
       // Same rationale as RunForeachParSpec: a broken round handoff manifests as

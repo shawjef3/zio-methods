@@ -32,30 +32,30 @@ object FailureAccumulatorSpec extends ZIOSpecDefault {
   private def causeOf(exit: Exit[String, Unit]): Option[Cause[String]] =
     exit match {
       case Exit.Failure(cause) => Some(cause)
-      case _                   => None
+      case _ => None
     }
 
   def spec =
     suite("FailureAccumulator")(
       test("a run that never fails succeeds with no cause") {
         for {
-          acc    <- FailureAccumulator.make[String]
+          acc <- FailureAccumulator.make[String]
           result <- acc.result
         } yield assertTrue(result.isSuccess)
       },
       test("a recorded failure is returned as that cause") {
         for {
-          acc    <- FailureAccumulator.make[String]
-          _      <- acc.record(Cause.fail("boom"))
+          acc <- FailureAccumulator.make[String]
+          _ <- acc.record(Cause.fail("boom"))
           result <- acc.result
         } yield assertTrue(causeOf(result).exists(_.failures == List("boom")))
       },
       test("two recorded failures accumulate rather than replace") {
         // The type cannot enforce `&&` over `=`; this is what guards it.
         for {
-          acc    <- FailureAccumulator.make[String]
-          _      <- acc.record(Cause.fail("first"))
-          _      <- acc.record(Cause.fail("second"))
+          acc <- FailureAccumulator.make[String]
+          _ <- acc.record(Cause.fail("first"))
+          _ <- acc.record(Cause.fail("second"))
           result <- acc.result
         } yield assertTrue(causeOf(result).exists(_.failures.toSet == Set("first", "second")))
       },
@@ -64,18 +64,18 @@ object FailureAccumulatorSpec extends ZIOSpecDefault {
         // must fail, but nothing is recorded, so the cause is empty. Reading the
         // cause alone would call this a success.
         for {
-          acc    <- FailureAccumulator.make[String]
-          fiber  <- ZIO.fiberId
-          _      <- acc.record(Cause.interrupt(fiber))
+          acc <- FailureAccumulator.make[String]
+          fiber <- ZIO.fiberId
+          _ <- acc.record(Cause.interrupt(fiber))
           result <- acc.result
         } yield assertTrue(!result.isSuccess) &&
           assertTrue(causeOf(result).exists(_.isEmpty))
       },
       test("an interruption-only cause still fires the signal") {
         for {
-          acc   <- FailureAccumulator.make[String]
+          acc <- FailureAccumulator.make[String]
           fiber <- ZIO.fiberId
-          _     <- acc.record(Cause.interrupt(fiber))
+          _ <- acc.record(Cause.interrupt(fiber))
           // `await` must already be complete, so a timeout here means the signal
           // never fired and a real run would hang instead of failing fast.
           awaited <- acc.await.timeout(5.seconds)
@@ -86,9 +86,9 @@ object FailureAccumulatorSpec extends ZIOSpecDefault {
         // genuine failure as well must still be recorded, or fail-fast would
         // discard the reason the run stopped.
         for {
-          acc    <- FailureAccumulator.make[String]
-          fiber  <- ZIO.fiberId
-          _      <- acc.record(Cause.fail("real") && Cause.interrupt(fiber))
+          acc <- FailureAccumulator.make[String]
+          fiber <- ZIO.fiberId
+          _ <- acc.record(Cause.fail("real") && Cause.interrupt(fiber))
           result <- acc.result
         } yield assertTrue(causeOf(result).exists(_.failures == List("real")))
       },
@@ -96,9 +96,9 @@ object FailureAccumulatorSpec extends ZIOSpecDefault {
         // Fail-fast interrupts the other workers only after `await` completes,
         // so whichever cause fired the signal must already be readable by then.
         for {
-          acc    <- FailureAccumulator.make[String]
-          _      <- acc.record(Cause.fail("boom"))
-          _      <- acc.await
+          acc <- FailureAccumulator.make[String]
+          _ <- acc.record(Cause.fail("boom"))
+          _ <- acc.await
           result <- acc.result
         } yield assertTrue(causeOf(result).exists(_.failures == List("boom")))
       }

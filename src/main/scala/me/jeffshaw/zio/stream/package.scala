@@ -85,7 +85,7 @@ package object stream {
       trace: Trace
     ): ZIO[R1, E1, Unit] =
       ZIO.suspendSucceed {
-        val nn          = n
+        val nn = n
         val bufferSizeV = bufferSize
         // Only a non-positive `n` falls back to sequential consumption, where
         // "no workers" has no sensible forked meaning. `n == 1` takes the normal
@@ -104,10 +104,10 @@ package object stream {
               // level — matching `mapZIOParUnordered` — without a chunk boundary
               // barrier, and without the per-element `Exit.Success` boxing of an
               // element-granular queue.
-              queue      <- Queue.bounded[Take[E, A]](bufferSizeV)
-              _          <- scope.addFinalizer(queue.shutdown)
+              queue <- Queue.bounded[Take[E, A]](bufferSizeV)
+              _ <- scope.addFinalizer(queue.shutdown)
               childScope <- scope.fork
-              fiberId    <- ZIO.fiberId
+              fiberId <- ZIO.fiberId
               // Holds whether the run failed, why, and the fail-fast signal, as
               // one mechanism. See `FailureAccumulator` for the invariants that
               // keeping them together enforces, in particular that an
@@ -117,9 +117,9 @@ package object stream {
               // terminated by `Take.end` on end-of-stream or `Take.failCause` on
               // error.
               _ <- self
-                     .runIntoQueueScoped(queue)
-                     .provideSomeEnvironment[R1](_.add[Scope](childScope))
-                     .forkIn(childScope)
+                .runIntoQueueScoped(queue)
+                .provideSomeEnvironment[R1](_.add[Scope](childScope))
+                .forkIn(childScope)
               // Batched fetch: one round spans every chunk already buffered
               // rather than exactly one, which keeps the round boundary rare,
               // along with the wake-herd it causes when `n` exceeds the chunk size.

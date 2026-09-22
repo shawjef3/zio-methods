@@ -68,7 +68,7 @@ class CrossoverBenchmark {
 
   private val f: Int => ZIO[Any, Nothing, Any] = { i =>
     ZIO.succeed {
-      var acc  = i.toLong
+      var acc = i.toLong
       var iter = 0
       while (iter < fCostIters) {
         acc = acc * 6364136223846793005L + 1442695040888963407L

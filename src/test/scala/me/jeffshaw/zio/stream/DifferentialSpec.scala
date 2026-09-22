@@ -136,9 +136,9 @@ object DifferentialSpec extends ZIOSpecDefault {
   ): UIO[TestResult] = {
     def runOne(useOurs: Boolean): UIO[Outcome] =
       for {
-        seen  <- Ref.make(Map.empty[Int, Int])
+        seen <- Ref.make(Map.empty[Int, Int])
         record = (a: Int) => seen.update(m => m.updated(a, m.getOrElse(a, 0) + 1))
-        body   = (a: Int) => f(a, record)
+        body = (a: Int) => f(a, record)
         exit <-
           (if (useOurs) stream.runForeachPar(n, bufferSize)(body)
            else stream.mapZIOParUnordered(n, bufferSize)(body).runDrain).exit

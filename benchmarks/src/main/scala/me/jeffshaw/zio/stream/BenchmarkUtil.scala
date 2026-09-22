@@ -7,8 +7,8 @@ import zio._
  * of ZIO's own `zio.BenchmarkUtil` that the `runForeachPar` benchmarks use.
  */
 object BenchmarkUtil extends Runtime[Any] { self =>
-  val environment  = Runtime.default.environment
-  val fiberRefs    = Runtime.default.fiberRefs
+  val environment = Runtime.default.environment
+  val fiberRefs = Runtime.default.fiberRefs
   val runtimeFlags = Runtime.default.runtimeFlags
 
   override val unsafe = super.unsafe

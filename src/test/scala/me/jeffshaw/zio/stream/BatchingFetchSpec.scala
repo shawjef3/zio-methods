@@ -38,7 +38,7 @@ object BatchingFetchSpec extends ZIOSpecDefault {
   private def elements(take: Take[String, Int]): Option[Chunk[Int]] =
     take.exit match {
       case Exit.Success(chunk) => Some(chunk)
-      case _                   => None
+      case _ => None
     }
 
   private def fetcher(takes: Take[String, Int]*): UIO[BatchingFetch[String, Int]] =
@@ -51,7 +51,7 @@ object BatchingFetchSpec extends ZIOSpecDefault {
     suite("BatchingFetch")(
       suite("fuse")(
         test("a single take is returned as-is, without copying") {
-          val only  = data(1, 2, 3)
+          val only = data(1, 2, 3)
           val fused = BatchingFetch.fuse(Chunk(only))
           // Identity, not just equality: the n <= chunkSize regime must make no
           // copy at all.
@@ -97,22 +97,22 @@ object BatchingFetchSpec extends ZIOSpecDefault {
       suite("effect")(
         test("delivers the fused data round, then the parked terminal") {
           for {
-            b      <- fetcher(data(1, 2), data(3), Take.end)
-            first  <- b.effect
+            b <- fetcher(data(1, 2), data(3), Take.end)
+            first <- b.effect
             second <- b.effect
           } yield assertTrue(elements(first).contains(Chunk(1, 2, 3))) &&
             assertTrue(elements(second).isEmpty)
         },
         test("a parked failing terminal survives to the next fetch") {
           for {
-            b     <- fetcher(data(1), Take.fail("boom"))
+            b <- fetcher(data(1), Take.fail("boom"))
             first <- b.effect
             // The terminal was parked mid-batch; the failure must still arrive.
             second <- b.effect
             cause = second.exit match {
-                      case Exit.Failure(c) => Cause.flipCauseOption(c)
-                      case _               => None
-                    }
+              case Exit.Failure(c) => Cause.flipCauseOption(c)
+              case _ => None
+            }
           } yield assertTrue(elements(first).contains(Chunk(1))) &&
             assertTrue(cause.exists(_.failures == List("boom")))
         },
@@ -120,10 +120,10 @@ object BatchingFetchSpec extends ZIOSpecDefault {
           // A worker that re-fetches after the terminal must keep seeing it,
           // rather than falling through to a queue pull that would block.
           for {
-            b      <- fetcher(data(1), Take.end)
-            _      <- b.effect
+            b <- fetcher(data(1), Take.end)
+            _ <- b.effect
             second <- b.effect
-            third  <- b.effect
+            third <- b.effect
           } yield assertTrue(elements(second).isEmpty) && assertTrue(elements(third).isEmpty)
         }
       )
