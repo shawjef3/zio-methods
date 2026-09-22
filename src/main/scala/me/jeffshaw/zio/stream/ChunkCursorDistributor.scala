@@ -139,12 +139,12 @@ private[stream] object ChunkCursorDistributor {
    *   - `stops pulling once a terminal round is reached` at `n = 32`: 33, not 2.
    *   - `a failure terminal is reported exactly once`: reported twice.
    *
-   * [[zio.MethodsWorkerPool]] is what starts them now, forking into the calling
-   * fiber's scope rather than the global one. It was derived by copying ZIO's
+   * [[WorkerPool]] is what starts them now, forking into the calling fiber's
+   * scope rather than the global one. It was derived by copying ZIO's
    * `foreachParUnboundedDiscard` verbatim — the implementation
    * `foreachParDiscard` resolved to here — and removing one piece at a time
    * with the suite run after each, which is what identified `forkDaemon` as the
-   * part that mattered. See that class for what the copy drops and why.
+   * part that mattered. See that object for what it drops and why.
    */
   def run[R, E <: E1, E1, A](
     n: Int,
@@ -161,6 +161,6 @@ private[stream] object ChunkCursorDistributor {
       val dispatcher = new Dispatcher[R, E, E1, A](n, fetch, f, onError)
       // The workers share a single-use election point, which forking them as
       // daemons breaks. See the precondition on this method.
-      _root_.zio.MethodsWorkerPool.replicate(n)(dispatcher.loop(dispatcher.seed, 0))
+      WorkerPool.replicate(n)(dispatcher.loop(dispatcher.seed, 0))
     }
 }

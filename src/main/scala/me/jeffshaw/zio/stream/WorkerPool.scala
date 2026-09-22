@@ -14,20 +14,23 @@
  * limitations under the License.
  */
 
-package zio
+package me.jeffshaw.zio.stream
 
+import zio._
 import zio.stacktracer.TracingImplicits.disableAutoTrace
+
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Runs `n` copies of one effect concurrently, completing when the last of them
  * finishes.
  *
  * This replaces `ZIO.foreachParDiscard(1 to n)(...).withParallelism(n)` in
- * [[me.jeffshaw.zio.stream.ChunkCursorDistributor]], and is derived from the
- * implementation that call resolves to: ZIO 2.1.26's private
- * `ZIO.foreachParUnboundedDiscard`, selected because `parallelism == size`.
+ * [[ChunkCursorDistributor]], and is derived from the implementation that call
+ * resolves to: ZIO 2.1.26's private `ZIO.foreachParUnboundedDiscard`, selected
+ * because `parallelism == size`.
  *
- * ==What it drops, and why that is worth a copy==
+ * ==What it drops, and why that is worth doing by hand==
  *
  * The library version keeps a `Chunk` of all `n` `Fiber.Runtime`s and captures
  * it in the continuation of `promise.await`, so every fiber object stays
@@ -52,21 +55,28 @@ import zio.stacktracer.TracingImplicits.disableAutoTrace
  * counts interruptions, and sees 0 instead of 2 if the workers are forked as
  * daemons without the retained collection.
  *
- * ==Why `package zio`==
+ * ==How this was arrived at==
  *
- * `Promise.unsafe` is `private[zio]`. Being in the package let this start as a
- * faithful copy, with pieces removed one at a time and the tests run after
- * each, rather than reconstructing the behavior from guesses — which had
- * already failed four times against a protocol whose startup precondition is
- * documented on [[me.jeffshaw.zio.stream.ChunkCursorDistributor.run]]. The
- * bisection is what identified `forkDaemon`, rather than anything about
- * scheduling, as the part that mattered.
+ * [[ChunkCursorDistributor]] starts every worker on a shared, single-use
+ * election point (see the precondition on [[ChunkCursorDistributor.run]]), and
+ * four hand-written fork loops broke it before the cause was found. What
+ * worked was copying `foreachParUnboundedDiscard` verbatim into `package zio`
+ * — where its `private[zio]` dependencies are reachable — confirming the copy
+ * passed the suite, then removing one piece at a time and re-running. That
+ * identified `forkDaemon`, rather than anything about scheduling, as the part
+ * that mattered.
  *
- * Nothing outside this object depends on that access, and the only remaining
- * use of it is `promise.unsafe.done`, which avoids an `Exit` allocation per
- * worker exit.
+ * The copy has since been reduced to public API and moved here. Two
+ * substitutions were needed, both off the per-element path:
+ *
+ *   - `Promise.make` in place of `Promise.unsafe.make`, which is public but
+ *     would need an `Unsafe` in scope. This is one effect per run.
+ *   - `Promise#done` in place of the `private[zio]` `promise.unsafe.done`.
+ *     `done(io)` is `ZIO.succeed(unsafe.completeWith(io))`, so the work is
+ *     identical and the cost is one effect node, once per run — only the final
+ *     worker to exit completes the promise.
  */
-object MethodsWorkerPool {
+private[stream] object WorkerPool {
 
   /**
    * Forks `n` copies of `worker` and completes when the last one exits.
@@ -82,26 +92,27 @@ object MethodsWorkerPool {
       case 1 => worker.unit
       case size =>
         ZIO.uninterruptibleMask { restore =>
-          val promise = Promise.unsafe.make[Unit, Unit](FiberId.None)(Unsafe)
-          val remaining = new java.util.concurrent.atomic.AtomicInteger(size)
+          // `Promise[Nothing, Unit]`, not the library's `Promise[Unit, Unit]`:
+          // the countdown is the only writer and it only ever writes success,
+          // so the failure case is uninhabited and the await needs no fold.
+          Promise.make[Nothing, Unit].flatMap { allDone =>
+            val remaining = new AtomicInteger(size)
+            // `Exit.unit` is a singleton, so `done(Exit.unit)` allocates
+            // nothing — the substitution `FailureAccumulator` documents for the
+            // same `private[zio]` `succeedUnit`.
+            val signalLast = ZIO.suspendSucceed {
+              if (remaining.decrementAndGet() == 0) allDone.done(Exit.unit).unit
+              else Exit.unit
+            }
 
-          ZIO.foreachDiscard(0 until size) { _ =>
-            restore(worker)
-              .ensuring(ZIO.succeed {
-                if (remaining.decrementAndGet() == 0) promise.unsafe.done(Exit.unit)(Unsafe)
-              })
-              .fork
-          } *>
-            // `ensuring` runs on interruption too, so the count reaches zero
-            // whether the workers complete or are interrupted, and a fail-fast
-            // teardown cannot leave this await hanging.
-            //
-            // The promise keeps the library's `Promise[Unit, Unit]` shape, but
-            // nothing here ever fails it: the countdown is the only writer and
-            // it only writes success. The `orDieWith` is a type-level formality
-            // over an uninhabited failure.
-            restore(promise.await)
-              .orDieWith(_ => new IllegalStateException("runForeachPar worker pool failed unexpectedly"))
+            ZIO.foreachDiscard(0 until size) { _ =>
+              restore(worker).ensuring(signalLast).fork
+            } *>
+              // `ensuring` runs on interruption too, so the count reaches zero
+              // whether the workers complete or are interrupted, and a
+              // fail-fast teardown cannot leave this await hanging.
+              restore(allDone.await)
+          }
         }
     }
 }
