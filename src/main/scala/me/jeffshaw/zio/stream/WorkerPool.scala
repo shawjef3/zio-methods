@@ -66,6 +66,23 @@ import java.util.concurrent.atomic.AtomicInteger
  * identified `forkDaemon`, rather than anything about scheduling, as the part
  * that mattered.
  *
+ * ==What it is worth==
+ *
+ * Retention, not throughput. Measured against the previous implementation with
+ * `WorkerStartupBenchmark` — a deliberately tiny stream so that a run is
+ * dominated by pool setup and teardown — every point from `n = 4` to
+ * `n = 16384` had overlapping error bars, and the one apparent separation
+ * (−14% at `n = 16384` over 10,000 elements) fell to −4.6% when re-measured
+ * alone at `-f 5 -wi 10 -i 10`, with the baseline side then showing a fork that
+ * never reached steady state. Forking `n` fibers dominates either way; not
+ * retaining them afterwards does not make the forking faster.
+ *
+ * So this exists to stop holding ~40,960 fiber objects for the length of a run,
+ * and that is not something the benchmarks measure. `RetentionSpec` covers
+ * *element* retention only, so nothing currently guards it.
+ *
+ * ==Reduction to public API==
+ *
  * The copy has since been reduced to public API and moved here. Two
  * substitutions were needed, both off the per-element path:
  *
