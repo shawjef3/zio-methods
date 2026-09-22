@@ -26,8 +26,8 @@ import zio.test._
  * `foldCauseZIO` on an already-completed `Exit` runs its continuation inline
  * rather than returning to the ZIO interpreter, so a synchronous `f` makes the
  * `loop`/`runClaim` cycle ordinary JVM recursion whose depth is the length of
- * the round rather than of a claim. `Round.MaxStride` bounds a claim at 16 and
- * does not bound this.
+ * the round rather than of a claim. `Round.MaxStride` bounds a claim and does
+ * not bound this.
  *
  * These tests run on a thread with an explicitly small stack, because the
  * default `zio-test` fiber stack is generous enough to hide the bug: before the

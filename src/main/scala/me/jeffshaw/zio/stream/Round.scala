@@ -72,8 +72,34 @@ private[stream] object Round {
    * straggler, so the tail costs up to `(stride - 1) * cost(f)` of idle time
    * for the other workers to save `(stride - 1) / stride` of the cursor's
    * atomic operations. The cap bounds that tail.
+   *
+   * 256 rather than 16, which is where this was originally set. The cap was
+   * binding by a factor of 16 in the regime it matters most: at 512-element
+   * chunks with `n = 4`, a fused round of sixteen chunks wants a stride of
+   * `8192 / 32 = 256`, and 16 threw away fifteen sixteenths of the available
+   * amortization.
+   *
+   * Swept over {16, 64, 256} on `FetchPathBenchmark`, then the endpoints
+   * re-measured at `-f 5 -wi 10 -i 10`:
+   *
+   *   - 512-element chunks, `n = 4`, no-op `f`: 698.87 ± 8.97 to 788.25 ± 8.67
+   *     ops/s, '''+12.8%''', fork spreads 1.2% and 2.9%.
+   *   - 64-element chunks, `n = 4`: -1.0% at 64 and -1.8% at 256, both inside
+   *     error. Rounds there are too small for the cap to bind, so this is the
+   *     control that should not move, and does not.
+   *   - 512-element chunks, `n = 64`: the stride is 1 whatever the cap is, so
+   *     this cannot legitimately move either. Its apparent +7.6% came with a
+   *     20% fork spread and is noise.
+   *
+   * The tail the cap exists to bound was measured too, since a no-op `f` cannot
+   * show it. `CrossoverBenchmark` at `fCostIters = 5000`, `n = 4` — expensive
+   * enough that a 256-element claim is a real serialization risk — reads
+   * 62.51 ± 2.89 against 61.57 ± 2.73, i.e. -1.5% with heavily overlapping
+   * bars. [[ClaimsPerWorker]] is what actually protects that case: it keeps the
+   * quotient at 1 whenever a round holds fewer than `n * 8` elements, which is
+   * the norm once `f` is slow, so the cap is not reached there at all.
    */
-  private final val MaxStride = 16
+  private final val MaxStride = 256
 
   /**
    * How many claims each worker should get per round, at minimum. This is what

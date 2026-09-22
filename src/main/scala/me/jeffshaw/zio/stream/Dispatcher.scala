@@ -154,7 +154,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
     // when `f` does not suspend — `Exit.unit`, `ZIO.succeed`, any pure
     // computation — the whole `loop`/`runClaim` cycle is ordinary JVM
     // recursion and the stack grows with the round, not with the claim.
-    // `MaxStride` bounds a single claim at 16; it does not bound this.
+    // `MaxStride` bounds a single claim; it does not bound this.
     // Measured before the fix: a single 200k-element chunk with a no-op `f`
     // overflows a 512KB stack, and the error escapes as a fiber defect.
     //
