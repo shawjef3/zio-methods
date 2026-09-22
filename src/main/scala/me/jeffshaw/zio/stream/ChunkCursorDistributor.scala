@@ -143,11 +143,22 @@ private[stream] object ChunkCursorDistributor {
    * protocol is not silently at risk — but they diagnose the symptom, not the
    * cause, which is why it is written down here.
    *
-   * '''What exactly `foreachParDiscard` provides is not established.''' It is
-   * something about how ZIO's `foreachParUnboundedDiscard` (the branch taken
-   * here, since `parallelism == size`) schedules the forked children relative
-   * to the forking fiber; `uninterruptibleMask` alone does not reproduce it,
-   * and made matters worse. Anyone reworking this should not try to guess it.
+   * '''What exactly `foreachParDiscard` provides is not established.''' A
+   * standalone probe narrowed it without settling it. With a terminal-only
+   * script, where exactly one fetch is correct, a fork loop has '''every'''
+   * worker reach `fetch` (2 of 2, 8 of 8, 32 of 32) while `foreachParDiscard`
+   * has exactly one — so election fails outright, not intermittently, and no
+   * data round need exist for it to happen. The probe ruled out the obvious
+   * candidates: the seed is a single shared instance
+   * (`identityHashCode` is constant across workers), and claiming from its
+   * cursor directly across `n` fibers returns `0..n-1` exactly once each, so
+   * only `i == 0` should elect.
+   *
+   * That leaves a genuine contradiction — sampling the cursor directly and
+   * running the same claim through `loop` disagree — and it is unresolved.
+   * `uninterruptibleMask` alone does not reproduce what `foreachParDiscard`
+   * provides, and made matters worse. Anyone reworking this should measure
+   * rather than reason: the contradiction above is where to start.
    *
    * The robust fix, if this call ever needs to change — for instance to drop
    * the `Chunk` of `n` `Fiber.Runtime`s that `foreachParUnboundedDiscard`
