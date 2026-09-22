@@ -55,7 +55,15 @@ class CrossoverBenchmark {
   @Param(Array("0", "10", "50", "200", "1000", "5000"))
   var fCostIters: Int = _
 
-  @Param(Array("4"))
+  /**
+   * The README presents the crossover ("between 200 and 1,000 iterations") as a
+   * general figure, but it was only ever swept at `n = 4`. The break-even
+   * should move with `n`: more workers divide the work further, which pulls the
+   * crossover down, while also costing more coordination, which pushes it up.
+   * Sweeping `n` is what turns the table into a claim about the combinator
+   * rather than about one configuration of it.
+   */
+  @Param(Array("2", "4", "8", "32"))
   var n: Int = _
 
   var zioChunks: IndexedSeq[Chunk[Int]] = _
@@ -85,6 +93,11 @@ class CrossoverBenchmark {
     chunkCount.toLong * chunkSize
   }
 
+  /**
+   * The sequential baseline does not use `n`, so sweeping `n` would re-measure
+   * an identical configuration once per value. Pin it with `-p n=4` when
+   * running the sweep, and compare every `par` point against that one baseline.
+   */
   @Benchmark
   def sequential: Long = {
     unsafeRun(ZStream.fromChunks(zioChunks: _*).runForeach(f))
