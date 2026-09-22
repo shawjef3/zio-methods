@@ -125,7 +125,7 @@ package object stream {
               // along with the wake-herd it causes when `n` exceeds the chunk size.
               // See `BatchingFetch` for why, and for the terminal parking that
               // makes a batch containing end-of-stream safe. Built once per run.
-              fetch = BatchingFetch.effect[E, A](queue, bufferSizeV)
+              fetch = BatchingFetch.effect[E, A](queue, bufferSizeV, nn)
               // `n` workers claim elements from the shared cursor and apply `f`. A
               // worker that finishes an element immediately claims the next, so
               // there is no barrier between chunks; a single chunk keeps all `n`

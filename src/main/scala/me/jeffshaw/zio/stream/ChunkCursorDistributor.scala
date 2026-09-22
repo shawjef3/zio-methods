@@ -141,8 +141,8 @@ private[stream] object ChunkCursorDistributor {
    *
    * [[WorkerPool]] is what starts them now, forking into the calling fiber's
    * scope rather than the global one. It was derived by copying ZIO's
-   * `foreachParUnboundedDiscard` verbatim — the implementation
-   * `foreachParDiscard` resolved to here — and removing one piece at a time
+   * `foreachParUnboundedDiscard` verbatim (the implementation
+   * `foreachParDiscard` resolved to here) and removing one piece at a time
    * with the suite run after each, which is what identified `forkDaemon` as the
    * part that mattered. See that object for what it drops and why.
    */

@@ -92,8 +92,8 @@ private[stream] object Round {
    *     20% fork spread and is noise.
    *
    * The tail the cap exists to bound was measured too, since a no-op `f` cannot
-   * show it. `CrossoverBenchmark` at `fCostIters = 5000`, `n = 4` — expensive
-   * enough that a 256-element claim is a real serialization risk — reads
+   * show it. `CrossoverBenchmark` at `fCostIters = 5000`, `n = 4`, expensive
+   * enough that a 256-element claim is a real serialization risk, reads
    * 62.51 ± 2.89 against 61.57 ± 2.73, i.e. -1.5% with heavily overlapping
    * bars. [[ClaimsPerWorker]] is what actually protects that case: it keeps the
    * quotient at 1 whenever a round holds fewer than `n * 8` elements, which is

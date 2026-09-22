@@ -82,7 +82,7 @@ import java.util.concurrent.atomic.AtomicReference
  * theory that the copy then buys nothing. It lost by 26-61% wherever it
  * engaged, worst at `n = 64` with 512-element chunks. That is the informative
  * direction: a lone 512-element chunk gives 64 workers eight elements each, so
- * the round boundary — a promise completion and up to `n - 1` worker wakes —
+ * the round boundary (a promise completion and up to `n - 1` worker wakes)
  * arrives every eight elements per worker, and fusing sixteen chunks makes it
  * sixteen times rarer. The losses scale with `n`, which is the wake-herd
  * signature.
@@ -93,7 +93,8 @@ import java.util.concurrent.atomic.AtomicReference
  */
 private[stream] final class BatchingFetch[E, A] private (
   queue: Queue[Take[E, A]],
-  batchMax: Int
+  batchMax: Int,
+  fuseTarget: Int
 ) {
 
   /**
@@ -132,8 +133,44 @@ private[stream] final class BatchingFetch[E, A] private (
     ZIO.suspendSucceed {
       val parked = pendingTerminal.get
       if (parked ne null) Exit.succeed(Take(parked))
-      else queue.takeBetween(1, batchMax).map(takes => split(takes))
+      else
+        queue.takeBetween(1, batchMax).flatMap { takes =>
+          // `batchMax` bounds the batch in *chunks*, but what a round needs is
+          // elements: at one element per chunk the default of 16 yields a
+          // 16-element round, which is the regime measured ~20x slower than
+          // 64-element chunks at equal element count.
+          //
+          // So when the batch is element-poor, keep draining. `takeAll` never
+          // blocks (it returns empty if the queue is dry), so this cannot add
+          // latency or stall a slow producer, and it is skipped entirely once
+          // the first take already clears the target, which is the common case
+          // for chunks of any real size.
+          if (elementsAtLeast(takes, fuseTarget)) Exit.succeed(split(takes))
+          else queue.takeAll.map(more => split(if (more.isEmpty) takes else takes ++ more))
+        }
     }
+
+  /**
+   * Whether `takes` carries at least `target` elements, stopping as soon as it
+   * does.
+   *
+   * Short-circuiting matters: this runs per round, and for chunks of any real
+   * size the first take settles it.
+   */
+  private def elementsAtLeast(takes: Chunk[Take[E, A]], target: Int): Boolean = {
+    var total = 0
+    var i = 0
+    while (i < takes.length && total < target) {
+      total += (takes(i).exit match {
+        case Exit.Success(chunk) => chunk.length
+        // A terminal contributes nothing, and stops the scan: there is no point
+        // draining further for elements that cannot be dispatched before it.
+        case _ => return total >= target
+      })
+      i += 1
+    }
+    total >= target
+  }
 }
 
 private[stream] object BatchingFetch {
@@ -153,16 +190,37 @@ private[stream] object BatchingFetch {
         case _ => Chunk.empty // unreachable: terminals are split off by `split`
       }))
 
-  /** Builds the per-run fetcher over `queue`, batching up to `bufferSize` chunks. */
-  def apply[E, A](queue: Queue[Take[E, A]], bufferSize: Int): BatchingFetch[E, A] =
-    new BatchingFetch[E, A](queue, bufferSize max 1)
+  /**
+   * How many elements a fused round should hold before the fetcher stops
+   * draining the queue for more.
+   *
+   * Matched to `Round.ClaimsPerWorker`: below `n * 8` elements `Round.strideFor`
+   * pins the stride to 1, so a round under this target gets no claim batching at
+   * all. Draining up to it is what lets the stride engage; past it there is
+   * nothing further to win, and `batchMax` still bounds the batch in chunks.
+   */
+  private final val FuseTargetClaimsPerWorker = 8
+
+  /**
+   * Builds the per-run fetcher over `queue`, batching up to `bufferSize` chunks
+   * and draining toward a round of `n * 8` elements.
+   */
+  def apply[E, A](queue: Queue[Take[E, A]], bufferSize: Int, n: Int): BatchingFetch[E, A] =
+    new BatchingFetch[E, A](
+      queue,
+      bufferSize max 1,
+      // In `Long` then clamped: `n` is caller-supplied and routinely in the
+      // thousands, where `n * 8` in `Int` would overflow to a negative target
+      // and make every batch look like it had already met it.
+      ((n.toLong max 1L) * FuseTargetClaimsPerWorker min Int.MaxValue.toLong).toInt
+    )
 
   /**
    * The per-run fetch effect over `queue`. Built once here, so a round pays only
    * the suspension and the pull.
    */
-  def effect[E, A](queue: Queue[Take[E, A]], bufferSize: Int)(implicit
+  def effect[E, A](queue: Queue[Take[E, A]], bufferSize: Int, n: Int)(implicit
     trace: Trace
   ): ZIO[Any, Nothing, Take[E, A]] =
-    apply[E, A](queue, bufferSize).effect
+    apply[E, A](queue, bufferSize, n).effect
 }

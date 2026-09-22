@@ -60,8 +60,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * [[ChunkCursorDistributor]] starts every worker on a shared, single-use
  * election point (see the precondition on [[ChunkCursorDistributor.run]]), and
  * four hand-written fork loops broke it before the cause was found. What
- * worked was copying `foreachParUnboundedDiscard` verbatim into `package zio`
- * — where its `private[zio]` dependencies are reachable — confirming the copy
+ * worked was copying `foreachParUnboundedDiscard` verbatim into `package zio`,
+ * where its `private[zio]` dependencies are reachable, confirming the copy
  * passed the suite, then removing one piece at a time and re-running. That
  * identified `forkDaemon`, rather than anything about scheduling, as the part
  * that mattered.
@@ -69,10 +69,10 @@ import java.util.concurrent.atomic.AtomicInteger
  * ==What it is worth==
  *
  * Retention, not throughput. Measured against the previous implementation with
- * `WorkerStartupBenchmark` — a deliberately tiny stream so that a run is
- * dominated by pool setup and teardown — every point from `n = 4` to
+ * `WorkerStartupBenchmark`, whose deliberately tiny stream leaves a run
+ * dominated by pool setup and teardown: every point from `n = 4` to
  * `n = 16384` had overlapping error bars, and the one apparent separation
- * (−14% at `n = 16384` over 10,000 elements) fell to −4.6% when re-measured
+ * (-14% at `n = 16384` over 10,000 elements) fell to -4.6% when re-measured
  * alone at `-f 5 -wi 10 -i 10`, with the baseline side then showing a fork that
  * never reached steady state. Forking `n` fibers dominates either way; not
  * retaining them afterwards does not make the forking faster.
@@ -90,7 +90,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *     would need an `Unsafe` in scope. This is one effect per run.
  *   - `Promise#done` in place of the `private[zio]` `promise.unsafe.done`.
  *     `done(io)` is `ZIO.succeed(unsafe.completeWith(io))`, so the work is
- *     identical and the cost is one effect node, once per run — only the final
+ *     identical and the cost is one effect node, once per run: only the final
  *     worker to exit completes the promise.
  */
 private[stream] object WorkerPool {
@@ -115,7 +115,7 @@ private[stream] object WorkerPool {
           Promise.make[Nothing, Unit].flatMap { allDone =>
             val remaining = new AtomicInteger(size)
             // `Exit.unit` is a singleton, so `done(Exit.unit)` allocates
-            // nothing — the substitution `FailureAccumulator` documents for the
+            // nothing: the substitution `FailureAccumulator` documents for the
             // same `private[zio]` `succeedUnit`.
             val signalLast = ZIO.suspendSucceed {
               if (remaining.decrementAndGet() == 0) allDone.done(Exit.unit).unit

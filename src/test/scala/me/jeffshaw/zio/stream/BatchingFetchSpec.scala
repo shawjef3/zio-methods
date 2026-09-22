@@ -41,11 +41,20 @@ object BatchingFetchSpec extends ZIOSpecDefault {
       case _ => None
     }
 
+  /**
+   * `n = 1`, so the fetcher's element target is 8. These tests use small takes
+   * and assert on what a single fetch returns, so a low target keeps the
+   * element-poor drain out of the way of what they are checking; the drain has
+   * its own tests below.
+   */
   private def fetcher(takes: Take[String, Int]*): UIO[BatchingFetch[String, Int]] =
+    fetcherWithN(1, takes: _*)
+
+  private def fetcherWithN(n: Int, takes: Take[String, Int]*): UIO[BatchingFetch[String, Int]] =
     Queue
       .bounded[Take[String, Int]](takes.length max 1)
       .tap(q => ZIO.foreachDiscard(takes)(q.offer))
-      .map(BatchingFetch[String, Int](_, 1024))
+      .map(BatchingFetch[String, Int](_, 1024, n))
 
   def spec =
     suite("BatchingFetch")(
@@ -92,6 +101,58 @@ object BatchingFetchSpec extends ZIOSpecDefault {
             b <- fetcher()
             out = b.split(Chunk(data(1), Take.end, data(99)))
           } yield assertTrue(elements(out).contains(Chunk(1)))
+        }
+      ),
+      suite("element-poor drain")(
+        test("an element-poor batch is topped up past bufferSize's chunk bound") {
+          // Eight single-element chunks with batchMax = 2: `takeBetween` can
+          // return at most 2, which is element-poor for n = 1 (target 8), so the
+          // fetch drains the rest non-blockingly and one round carries all 8.
+          for {
+            q <- Queue.bounded[Take[String, Int]](16)
+            _ <- ZIO.foreachDiscard(1 to 8)(i => q.offer(data(i)))
+            b = BatchingFetch[String, Int](q, 2, 1)
+            out <- b.effect
+          } yield assertTrue(elements(out).contains(Chunk(1, 2, 3, 4, 5, 6, 7, 8)))
+        },
+        test("a batch already at target is not drained further") {
+          // The first chunk alone meets the target, so the queue must be left
+          // alone: the second chunk stays for the next fetch.
+          for {
+            q <- Queue.bounded[Take[String, Int]](16)
+            _ <- q.offer(data(1, 2, 3, 4, 5, 6, 7, 8))
+            _ <- q.offer(data(9))
+            b = BatchingFetch[String, Int](q, 1, 1)
+            first <- b.effect
+            second <- b.effect
+          } yield assertTrue(elements(first).contains(Chunk(1, 2, 3, 4, 5, 6, 7, 8))) &&
+            assertTrue(elements(second).contains(Chunk(9)))
+        },
+        test("draining an empty queue adds nothing and does not block") {
+          // One element-poor chunk and nothing behind it. `takeAll` returns
+          // empty, so the round is what the first take held.
+          for {
+            q <- Queue.bounded[Take[String, Int]](16)
+            _ <- q.offer(data(1))
+            b = BatchingFetch[String, Int](q, 4, 1)
+            out <- b.effect.timeoutFail("blocked")(5.seconds).either
+          } yield assertTrue(out.isRight) &&
+            assertTrue(out.toOption.flatMap(elements).contains(Chunk(1)))
+        },
+        test("a terminal picked up by the drain is still parked, not lost") {
+          // The drain pulls the terminal in alongside data. It must be split off
+          // and delivered after the data round, exactly as when `takeBetween`
+          // returns it directly.
+          for {
+            q <- Queue.bounded[Take[String, Int]](16)
+            _ <- q.offer(data(1))
+            _ <- q.offer(data(2))
+            _ <- q.offer(Take.end)
+            b = BatchingFetch[String, Int](q, 1, 1)
+            first <- b.effect
+            second <- b.effect
+          } yield assertTrue(elements(first).contains(Chunk(1, 2))) &&
+            assertTrue(elements(second).isEmpty)
         }
       ),
       suite("effect")(
