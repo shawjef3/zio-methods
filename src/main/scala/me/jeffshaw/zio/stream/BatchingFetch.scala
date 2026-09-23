@@ -145,6 +145,19 @@ private[stream] final class BatchingFetch[E, A] private (
           // latency or stall a slow producer, and it is skipped entirely once
           // the first take already clears the target, which is the common case
           // for chunks of any real size.
+          //
+          // Measured on `FetchPathBenchmark` at one element per chunk, the
+          // regime this targets, re-run at `-f 5 -wi 10 -i 10`:
+          //
+          //   n = 4:  4.211 +/- 0.069 to 4.382 +/- 0.057 ops/s, +4.1%
+          //   n = 64: 2.789 +/- 0.044 to 3.052 +/- 0.068 ops/s, +9.4%
+          //
+          // Both separate, with fork spreads under 10%. The gain is larger at
+          // `n = 64` because the target scales with `n`: a 16-chunk batch holds
+          // 16 elements against a target of 512 there, versus 32 at `n = 4`, so
+          // the drain has more to add. At 64- and 512-element chunks the first
+          // take already meets the target and every point was flat, which is
+          // the control this needed to pass.
           if (elementsAtLeast(takes, fuseTarget)) Exit.succeed(split(takes))
           else queue.takeAll.map(more => split(if (more.isEmpty) takes else takes ++ more))
         }
