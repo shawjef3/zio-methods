@@ -73,33 +73,52 @@ private[stream] object Round {
    * for the other workers to save `(stride - 1) / stride` of the cursor's
    * atomic operations. The cap bounds that tail.
    *
-   * 256 rather than 16, which is where this was originally set. The cap was
-   * binding by a factor of 16 in the regime it matters most: at 512-element
-   * chunks with `n = 4`, a fused round of sixteen chunks wants a stride of
-   * `8192 / 32 = 256`, and 16 threw away fifteen sixteenths of the available
-   * amortization.
+   * 64 rather than 16, which is where this was originally set. At 16 the cap was
+   * binding hard in the regime it matters most: at 512-element chunks with
+   * `n = 4`, a fused round of sixteen chunks wants a stride of `8192 / 32 = 256`,
+   * so 16 discarded most of the available amortization.
    *
-   * Swept over {16, 64, 256} on `FetchPathBenchmark`, then the endpoints
-   * re-measured at `-f 5 -wi 10 -i 10`:
+   * Swept against two benchmarks, because one alone is misleading in each
+   * direction. `FetchPathBenchmark` at 512-element chunks with `n = 4` is the
+   * uniform, cheap-`f` case the amortization helps; `SkewedCostBenchmark` at
+   * `costRatio = 20`, `n = 4` clusters expensive elements so one claim can land
+   * entirely on them, which is the tail this cap exists to bound.
    *
-   *   - 512-element chunks, `n = 4`, no-op `f`: 698.87 ± 8.97 to 788.25 ± 8.67
-   *     ops/s, '''+12.8%''', fork spreads 1.2% and 2.9%.
-   *   - 64-element chunks, `n = 4`: -1.0% at 64 and -1.8% at 256, both inside
-   *     error. Rounds there are too small for the cap to bind, so this is the
-   *     control that should not move, and does not.
-   *   - 512-element chunks, `n = 64`: the stride is 1 whatever the cap is, so
-   *     this cannot legitimately move either. Its apparent +7.6% came with a
-   *     20% fork spread and is noise.
+   * | `MaxStride` | uniform | skew |
+   * |---|---|---|
+   * | 16 | 646.41 ± 34.05 | 50.24 ± 1.80 |
+   * | 32 | 652.41 ± 54.23 (+0.9%) | 51.54 ± 2.07 (+2.6%) |
+   * | '''64''' | '''693.89 ± 26.40 (+7.3%)''' | '''51.82 ± 1.24 (+3.1%)''' |
+   * | 256 | 739.14 ± 33.06 (+14.3%) | 44.53 ± 0.71 ('''-11.4%''') |
    *
-   * The tail the cap exists to bound was measured too, since a no-op `f` cannot
-   * show it. `CrossoverBenchmark` at `fCostIters = 5000`, `n = 4`, expensive
-   * enough that a 256-element claim is a real serialization risk, reads
-   * 62.51 ± 2.89 against 61.57 ± 2.73, i.e. -1.5% with heavily overlapping
-   * bars. [[ClaimsPerWorker]] is what actually protects that case: it keeps the
-   * quotient at 1 whenever a round holds fewer than `n * 8` elements, which is
-   * the norm once `f` is slow, so the cap is not reached there at all.
+   * 64 improves '''both''' columns, so it is not a compromise between them. The
+   * regression appears only between 64 and 256, which makes this a cliff rather
+   * than a gradual trade, and 64 sits below it.
+   *
+   * ==A cap in elements cannot bound a tail measured in work==
+   *
+   * This value was briefly 256, on a `FetchPathBenchmark` measurement alone. The
+   * check run at the time used `CrossoverBenchmark` at `fCostIters = 5000`, which
+   * is '''uniform''' cost: every claim is equally expensive, so no worker can be
+   * a straggler and the cap's purpose goes untested. With clustered costs, 256
+   * measured -13.6% (51.34 ± 1.63 to 44.36 ± 0.76, fork spreads 1.2% and 0.7%),
+   * with all three controls flat.
+   *
+   * The underlying reason is worth keeping in view. [[ClaimsPerWorker]] bounds
+   * the tail at `1 / ClaimsPerWorker` of the round '''in units of work''',
+   * whatever `f` costs, because `length / (n * ClaimsPerWorker)` shrinks the
+   * stride exactly when a round holds few elements per worker. That bound is
+   * independent of `cost(f)`, which is what makes it sound. This cap is an
+   * absolute element count, so once it binds it silently replaces that guarantee
+   * with "at most `MaxStride` elements, however long those take". At 256
+   * clustered slow elements that was roughly 1.5ms serialized behind one worker.
+   *
+   * So the cap is a backstop for rounds large enough that even a work-proportional
+   * bound is a lot of wall-clock, and it has to stay small enough that a claim of
+   * pathological elements is still survivable. Raising it further needs the skew
+   * benchmark, not just the uniform one.
    */
-  private final val MaxStride = 256
+  private final val MaxStride = 64
 
   /**
    * How many claims each worker should get per round, at minimum. This is what
