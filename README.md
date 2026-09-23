@@ -355,10 +355,21 @@ High-concurrency IO-like `f` — 200k elements, 2000-element chunks,
 settings — a longer warmup reaches ~860k at `n = 16384` — so compare variants
 only within one configuration.)
 
-At that scale the binding constraint is the ZIO runtime's own fiber wake and
-timer path, not this combinator: `runForeachPar` runs at or slightly above a
-stream-free `ZIO.foreachParDiscard(...).withParallelism(n)` control. The dip
-from 16k to 40k is the runtime degrading past ~16k fibers. Batching does not
+At that scale, with a 5 ms `f`, the binding constraint is the ZIO runtime's own
+fiber wake and timer path rather than this combinator: `runForeachPar` runs at
+or slightly above a stream-free `ZIO.foreachParDiscard(...).withParallelism(n)`
+control. The dip from 16k to 40k is the runtime degrading past ~16k fibers.
+
+That holds only while `f` is slow enough to dominate. With a cheap `f` the
+combinator's own round-publish wake is the constraint, and it is severe:
+`WakeHerdBenchmark` measures throughput at `n = 16384` as 0.9% of the `n = 4`
+figure with 16-element chunks, against 6.1% with 2048-element chunks. Same fiber
+count and same total work, so the difference is how many workers a round can
+occupy, which is what the wake walk scales with. `OPTIMIZATION_IDEAS.md` has the
+numbers and the candidate fixes; none is implemented yet, so high `n` with a
+cheap `f` is a regime to avoid rather than one to tune.
+
+Batching does not
 engage in this regime at all — rounds hold fewer than `n * 8` elements, so the
 stride is 1 — and the stride-1 fast paths exist to keep it costing nothing
 there; measured against per-element claims it is a wash (3.21 ± 0.11 vs
