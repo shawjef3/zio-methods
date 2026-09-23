@@ -225,13 +225,23 @@ per element. A worker therefore claims a contiguous *range* of `stride` elements
 per atomic and runs them without returning to the cursor.
 
 The stride is what makes this safe. It is derived per round as
-`length / (n * 8)`, capped at 16: every worker is left at least eight claims, so
+`length / (n * 8)`, capped at 64: every worker is left at least eight claims, so
 a worker that draws one oversized claim is at most an eighth of the round behind
 the rest, whatever `f` costs. Below `n * 8` elements per round the quotient is
 zero, the stride pins to 1, and dispatch is exactly per-element again — so the
 "single chunk saturates all `n` workers" guarantee holds unchanged, and a slow
 `f`, where a round rarely has that many elements per worker, never batches at
 all.
+
+The two bounds are not equivalent, which matters. `length / (n * 8)` bounds the
+tail in units of *work*, whatever `f` costs, and that is what makes it sound
+when `cost(f)` is unknown. The cap is an absolute element count, so wherever it
+binds it replaces that guarantee with "at most 64 elements, however long those
+take". Raising it to 256 measured +14% with a uniform cheap `f` and **−11% with
+clustered expensive elements**, which is the tail the cap exists to bound; 64
+improves both. A change to the cap therefore has to be measured against
+`SkewedCostBenchmark` and not only against the uniform benchmarks, because a
+uniform `f` cannot produce a straggler and so cannot detect the regression.
 
 Sizing the stride to give each worker *one* claim (`length / n`) was tried first
 and measured 7–9% **slower** at `n` in the thousands with a 5 ms `f`: with one
@@ -296,15 +306,33 @@ concurrency contract are unchanged. A single-chunk batch is returned as-is, so
 the low-`n` regime pays nothing for the fusion path. A terminal `Take` arriving
 mid-batch is split off and parked for the next fetch.
 
-`bufferSize` therefore sets both the pipelining depth and the fusion window.
+`bufferSize` therefore sets both the pipelining depth and the fusion window, but
+it bounds the batch in *chunks* while what a round needs is *elements*. At one
+element per chunk the default of 16 yields a 16-element round, which is the
+regime measured roughly 20× slower than 64-element chunks at equal element
+count. So when a batch falls short of `n * 8` elements, the same threshold below
+which the stride pins to 1 and claim batching does not engage at all, the
+fetcher keeps draining with a non-blocking `takeAll`. That cannot add latency or
+stall a slow producer, since `takeAll` returns empty on a dry queue, and it is
+skipped entirely once the first take already clears the target, which is the
+common case for chunks of any real size. Measured at one element per chunk:
++4.1% at `n = 4` and +9.4% at `n = 64`, with 64- and 512-element chunks flat.
 
 ### Notes
 
-- `n <= 1` short-circuits to `runForeach`.
+- `n <= 0` short-circuits to `runForeach`. `n == 1` does not, as the caveats
+  above explain: it keeps the worker topology.
 - Everything here uses public ZIO API. `Promise#done(Exit.unit)` stands in for
   the `private[zio]` `succeedUnit` (`Exit.unit` is a singleton, so it allocates
   nothing either), and terminal rounds simply leave their unused `next` promise
   uncompleted rather than reaching for `Promise#unsafe.done`.
+- The workers are started by `WorkerPool` rather than by
+  `ZIO.foreachParDiscard`, which is what the library call resolves to. That
+  version retains a `Chunk` of all `n` `Fiber.Runtime`s for the length of the
+  run, because it forks each worker onto the global scope and can only interrupt
+  them by holding them. Forking into the run's own scope makes interruption
+  structural and retains nothing, which matters at the `n` this combinator
+  advertises. It is a retention win, not a throughput one.
 
 ## Performance
 
@@ -316,6 +344,16 @@ misleading — a `ZIO.whileLoop` worker loop, for instance, cut allocation by
 Measured on 32 cores, JMH throughput mode. Scores below are ± the JMH error over
 several forks; the `n = 4` benchmarks in particular vary enough fork to fork that
 single-fork runs are not comparable — read them across forks or not at all.
+
+**The two tables immediately below are stale in three ways, and are kept as a
+record of relative standing rather than of current throughput.** They predate
+three changes that affect the combinator's speed: the stride cap rose from 16 to
+64, an element-poor fused round is now topped up from the queue, and the worker
+pool no longer retains a fiber per worker. They also predate converting the
+benchmarks from `Chunk[Int]` to a reference element type, which removed about
+11% of measured throughput that was boxing rather than dispatch. The ordering
+they show is unaffected, since every row moves the same way; the absolute
+figures are not current, and re-running them on 32 cores is what would fix that.
 
 The numbers in "Sizing `bufferSize` and chunks", in the `rechunk` and `n == 1`
 notes, and the `n` sweep in the crossover section come from a later run on a
@@ -448,12 +486,31 @@ real I/O is far past it.
     unbatched control doing the same total work.
   - `SingleWorkerBenchmark` — `n == 1` against `runForeach` across free, CPU-bound
     and parked producers, with `n == 0` as a delegation control.
+  - `WorkerStartupBenchmark`: pool setup and teardown, using a tiny stream and a
+    growing `n` so a run is dominated by starting workers rather than by work.
+  - `WakeHerdBenchmark`: the per-round wake cost, sweeping `n` past what the
+    work can use, with `chunkSize` varying how many workers a round can occupy
+    and `fCost` deciding whether the cost matters.
+  - `SkewedCostBenchmark`: tail imbalance, with expensive elements clustered so
+    one claim can land entirely on them. This is the benchmark a change to
+    `Round.MaxStride` has to pass; a uniform `f` cannot produce a straggler.
+  - `ElementTypeBenchmark`: what the element type costs, which is why the others
+    use a reference type rather than `Chunk[Int]`.
 
 ## Running
 
 ```
-sbt test
+sbt "Test/testOnly *"
 sbt "benchmarks/Jmh/run -f 2 -wi 5 -i 5 StreamParBenchmark"
 sbt "benchmarks/Jmh/run -f 1 RealisticParBenchmark"
 sbt "benchmarks/Jmh/run -f 2 CrossoverBenchmark"
 ```
+
+`Test/testOnly *` rather than `test`: this build aliases `test` to `testQuick`,
+which skips specs it believes are unaffected. That can report "No tests to run"
+or a reduced count in a way that reads as success.
+
+Benchmarks want a quiet machine, and a laptop is not one: clock boost depends on
+die temperature and recent history, so two identical runs minutes apart execute
+at different speeds. Run each parameter point as its own JVM invocation, since a
+single sweep lets JIT state from earlier points distort later ones.
