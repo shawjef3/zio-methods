@@ -123,11 +123,16 @@ class WakeHerdBenchmark {
   @Param(Array("noop", "spin1us", "spin10us", "park200us"))
   var fCost: String = _
 
-  var chunks: IndexedSeq[Chunk[Int]] = _
+  // `AnyRef`, not `Int`: `f` is `A => ZIO[R, E1, Any]`, so `A` erases to `Object`
+  // and an `Int` element boxes on every read. `ElementTypeBenchmark` measures that
+  // at about 11% of throughput in this configuration, which is a cost no
+  // production workload over a reference type pays. Distinct objects rather than
+  // one repeated, so the reads do not all hit one cache line.
+  var chunks: IndexedSeq[Chunk[AnyRef]] = _
 
   @Setup
   def setup(): Unit =
-    chunks = (0 until (totalElements / chunkSize)).map(i => Chunk.fromArray(Array.fill(chunkSize)(i)))
+    chunks = (0 until (totalElements / chunkSize)).map(_ => Chunk.fromArray(Array.fill[AnyRef](chunkSize)(new AnyRef)))
 
   @volatile var sink: Long = 0
 
@@ -140,7 +145,7 @@ class WakeHerdBenchmark {
     sink = acc
   }
 
-  private def callback: Int => ZIO[Any, Nothing, Any] =
+  private def callback: AnyRef => ZIO[Any, Nothing, Any] =
     fCost match {
       case "noop" => _ => Exit.unit
       case "spin1us" => _ => ZIO.succeed(spin(1000L))

@@ -44,21 +44,21 @@ class RealisticParBenchmark {
   @Param(Array("256", "2048", "16384", "40960"))
   var n: Int = _
 
-  var zioChunks: IndexedSeq[Chunk[Int]] = _
+  var zioChunks: IndexedSeq[Chunk[AnyRef]] = _
 
   @Setup
   def setup(): Unit =
-    zioChunks = (1 to chunkCount).map(i => Chunk.fromArray(Array.fill(chunkSize)(i)))
+    zioChunks = (1 to chunkCount).map(_ => Chunk.fromArray(Array.fill[AnyRef](chunkSize)(new AnyRef)))
 
   @volatile var sink: Long = 0
 
-  private val fSleep: Int => ZIO[Any, Nothing, Any] =
+  private val fSleep: AnyRef => ZIO[Any, Nothing, Any] =
     _ => ZIO.sleep(5.millis)
 
-  private def fSpin: Int => ZIO[Any, Nothing, Any] = { i =>
+  private def fSpin: AnyRef => ZIO[Any, Nothing, Any] = { e =>
     ZIO.succeed {
       val deadline = java.lang.System.nanoTime() + 5_000_000L
-      var acc = i.toLong
+      var acc = java.lang.System.identityHashCode(e).toLong
       while (java.lang.System.nanoTime() < deadline)
         acc = acc * 6364136223846793005L + 1442695040888963407L
       sink = acc

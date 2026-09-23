@@ -102,17 +102,17 @@ class SingleWorkerBenchmark {
   @Param(Array("500"))
   var fCostIters: Int = _
 
-  var chunks: IndexedSeq[Chunk[Int]] = _
+  var chunks: IndexedSeq[Chunk[AnyRef]] = _
 
   @Setup
   def setup(): Unit =
-    chunks = (0 until (totalElements / chunkSize)).map(i => Chunk.fromArray(Array.fill(chunkSize)(i)))
+    chunks = (0 until (totalElements / chunkSize)).map(_ => Chunk.fromArray(Array.fill[AnyRef](chunkSize)(new AnyRef)))
 
   @volatile var sink: Long = 0
 
-  private val f: Int => ZIO[Any, Nothing, Any] = { i =>
+  private val f: AnyRef => ZIO[Any, Nothing, Any] = { e =>
     ZIO.succeed {
-      var acc = i.toLong
+      var acc = java.lang.System.identityHashCode(e).toLong
       var iter = 0
       while (iter < fCostIters) {
         acc = acc * 6364136223846793005L + 1442695040888963407L
@@ -134,7 +134,7 @@ class SingleWorkerBenchmark {
    * `runForeach` *within* a producer shape, never a score from one shape
    * against a score from the other.
    */
-  private def source: ZStream[Any, Nothing, Int] = {
+  private def source: ZStream[Any, Nothing, AnyRef] = {
     val base = ZStream.fromChunks(chunks: _*)
     producer match {
       case "free" => base

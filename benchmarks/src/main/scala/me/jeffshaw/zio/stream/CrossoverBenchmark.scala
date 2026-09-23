@@ -73,17 +73,27 @@ class CrossoverBenchmark {
   @Param(Array("2", "4", "32"))
   var n: Int = _
 
-  var zioChunks: IndexedSeq[Chunk[Int]] = _
+  var zioChunks: IndexedSeq[Chunk[AnyRef]] = _
 
   @Setup
   def setup(): Unit =
-    zioChunks = (1 to chunkCount).map(i => Chunk.fromArray(Array.fill(chunkSize)(i)))
+    zioChunks = (1 to chunkCount).map(_ => Chunk.fromArray(Array.fill[AnyRef](chunkSize)(new AnyRef)))
 
   @volatile var sink: Long = 0
 
-  private val f: Int => ZIO[Any, Nothing, Any] = { i =>
+  /**
+   * Seeds the burn loop from the element's identity hash rather than its value.
+   *
+   * The elements are `AnyRef` rather than `Int` because `f` is
+   * `A => ZIO[R, E1, Any]`, so `A` erases to `Object` and an `Int` boxes on every
+   * read; `ElementTypeBenchmark` measures that at about 11% of throughput, which
+   * no production workload over a reference type pays. The seed still has to vary
+   * per element so the JIT cannot fold the loop, and `identityHashCode` is a
+   * cheap varying value with no allocation.
+   */
+  private val f: AnyRef => ZIO[Any, Nothing, Any] = { e =>
     ZIO.succeed {
-      var acc = i.toLong
+      var acc = java.lang.System.identityHashCode(e).toLong
       var iter = 0
       while (iter < fCostIters) {
         acc = acc * 6364136223846793005L + 1442695040888963407L

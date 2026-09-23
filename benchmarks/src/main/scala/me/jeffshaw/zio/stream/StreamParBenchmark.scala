@@ -38,17 +38,22 @@ class StreamParBenchmark {
   @Param(Array("50"))
   var parChunkSize: Int = _
 
-  var zioChunks: IndexedSeq[Chunk[Int]] = _
+  // `AnyRef`, not `Int`: `f` is `A => ZIO[R, E1, Any]`, so `A` erases to `Object`
+  // and an `Int` element boxes on every read. `ElementTypeBenchmark` measures that
+  // at about 11% of throughput, a cost no production workload over a reference
+  // type pays. The `BigDecimal` work is unchanged; only the seed differs, so the
+  // scores here are not comparable to the README table measured before this.
+  var zioChunks: IndexedSeq[Chunk[AnyRef]] = _
 
   @Setup
   def setup(): Unit =
-    zioChunks = (1 to chunkCount).map(i => Chunk.fromArray(Array.fill(parChunkSize)(i)))
+    zioChunks = (1 to chunkCount).map(_ => Chunk.fromArray(Array.fill[AnyRef](parChunkSize)(new AnyRef)))
 
   @Benchmark
   def zioRunForeachPar: Long = {
     val result = ZStream
       .fromChunks(zioChunks: _*)
-      .runForeachPar(4)(i => ZIO.succeed(BigDecimal.valueOf(i.toLong).pow(3)))
+      .runForeachPar(4)(e => ZIO.succeed(BigDecimal.valueOf(java.lang.System.identityHashCode(e).toLong).pow(3)))
 
     unsafeRun(result)
     zioChunks.length.toLong * parChunkSize
@@ -63,7 +68,7 @@ class StreamParBenchmark {
       .fromChunks(zioChunks: _*)
       .runForeachChunk { chunk =>
         ZIO
-          .foreachParDiscard(chunk)(i => ZIO.succeed(BigDecimal.valueOf(i.toLong).pow(3)))
+          .foreachParDiscard(chunk)(e => ZIO.succeed(BigDecimal.valueOf(java.lang.System.identityHashCode(e).toLong).pow(3)))
           .withParallelism(4)
       }
 
@@ -78,7 +83,7 @@ class StreamParBenchmark {
   def zioMapZIOParUnorderedDrain: Long = {
     val result = ZStream
       .fromChunks(zioChunks: _*)
-      .mapZIOParUnordered(4)(i => ZIO.succeed(BigDecimal.valueOf(i.toLong).pow(3)))
+      .mapZIOParUnordered(4)(e => ZIO.succeed(BigDecimal.valueOf(java.lang.System.identityHashCode(e).toLong).pow(3)))
       .runDrain
 
     unsafeRun(result)
@@ -92,7 +97,7 @@ class StreamParBenchmark {
   def zioMapZIOParDrain: Long = {
     val result = ZStream
       .fromChunks(zioChunks: _*)
-      .mapZIOPar(4)(i => ZIO.succeed(BigDecimal.valueOf(i.toLong).pow(3)))
+      .mapZIOPar(4)(e => ZIO.succeed(BigDecimal.valueOf(java.lang.System.identityHashCode(e).toLong).pow(3)))
       .runDrain
 
     unsafeRun(result)
@@ -105,7 +110,7 @@ class StreamParBenchmark {
   def zioRunForeachSequential: Long = {
     val result = ZStream
       .fromChunks(zioChunks: _*)
-      .runForeach(i => ZIO.succeed(BigDecimal.valueOf(i.toLong).pow(3)))
+      .runForeach(e => ZIO.succeed(BigDecimal.valueOf(java.lang.System.identityHashCode(e).toLong).pow(3)))
 
     unsafeRun(result)
     zioChunks.length.toLong * parChunkSize
@@ -191,7 +196,7 @@ class StreamParBenchmark {
    * Per-chunk producer work. The accumulator is consumed via `sink` (a
    * `@volatile` field) so the JIT cannot prove it dead and delete the loop.
    */
-  private def slowUpstream(s: ZStream[Any, Nothing, Int]): ZStream[Any, Nothing, Int] =
+  private def slowUpstream(s: ZStream[Any, Nothing, AnyRef]): ZStream[Any, Nothing, AnyRef] =
     s.mapChunks { chunk =>
       var acc = chunk.length
       var i = 0
@@ -249,11 +254,11 @@ class StreamParBenchmark {
    * parks the puller when the queue is empty. `bufferChunks` is deliberately
    * small so the consumer can out-run the producer and actually block.
    */
-  private def blockingUpstream: ZStream[Any, Nothing, Int] = {
+  private def blockingUpstream: ZStream[Any, Nothing, AnyRef] = {
     val bufferChunks = 4
     ZStream.unwrapScoped {
       for {
-        q <- Queue.bounded[Take[Nothing, Int]](bufferChunks)
+        q <- Queue.bounded[Take[Nothing, AnyRef]](bufferChunks)
         producer = ZIO.foreachDiscard(zioChunks) { chunk =>
           val offer = q.offer(Take.chunk(chunk))
           if (producerDelayNanos == 0L) offer

@@ -134,22 +134,30 @@ class SkewedCostBenchmark {
   @Param(Array("4096"))
   var slowEvery: Int = _
 
-  var chunks: IndexedSeq[Chunk[Int]] = _
+  var chunks: IndexedSeq[Chunk[AnyRef]] = _
 
   /**
-   * Each element is its own index, negated when it should be slow. The sign
-   * carries the fast/slow decision while the magnitude stays unique per element,
-   * which keeps the burn loop's seed varying so the JIT cannot fold it into two
-   * cached results.
+   * A distinct object per element, carrying its own cost.
+   *
+   * The elements are a reference type rather than `Int` because `f` is
+   * `A => ZIO[R, E1, Any]`, so `A` erases to `Object` and an `Int` boxes on every
+   * read; `ElementTypeBenchmark` measures that at about 11% of throughput, which
+   * no production workload over a reference type pays. A small class is the
+   * natural fit here since the element has to carry the fast/slow decision
+   * anyway, and a distinct instance per element keeps the reads off a single
+   * cache line.
    */
+  final class Element(val iterations: Int)
+
   @Setup
   def setup(): Unit = {
-    val costs = Array.tabulate(totalElements) { i =>
-      val v = i + 1
-      if ((i % slowEvery) < slowRunLength) -v else v
+    val fast = fastCostIters
+    val slow = fastCostIters * costRatio
+    val elems = Array.tabulate[AnyRef](totalElements) { i =>
+      new Element(if ((i % slowEvery) < slowRunLength) slow else fast)
     }
     chunks = (0 until (totalElements / chunkSize)).map { c =>
-      Chunk.fromArray(costs.slice(c * chunkSize, (c + 1) * chunkSize))
+      Chunk.fromArray(elems.slice(c * chunkSize, (c + 1) * chunkSize))
     }
   }
 
@@ -176,13 +184,13 @@ class SkewedCostBenchmark {
     sink = acc
   }
 
-  private def callback: Int => ZIO[Any, Nothing, Any] = {
-    val fast = fastCostIters
-    val slow = fastCostIters * costRatio
-    // The element is the seed as well as the fast/slow marker, so successive
-    // calls cannot share a folded result.
-    marker => ZIO.succeed(burn(marker.toLong, if (marker < 0) slow else fast))
-  }
+  // The element carries its own iteration count, and its identity hash seeds the
+  // burn loop so successive calls cannot share a folded result.
+  private def callback: AnyRef => ZIO[Any, Nothing, Any] =
+    e => {
+      val el = e.asInstanceOf[Element]
+      ZIO.succeed(burn(java.lang.System.identityHashCode(el).toLong, el.iterations))
+    }
 
   @Benchmark
   def runForeachPar: Long = {

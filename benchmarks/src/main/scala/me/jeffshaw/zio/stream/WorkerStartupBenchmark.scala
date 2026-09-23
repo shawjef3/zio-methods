@@ -73,15 +73,19 @@ class WorkerStartupBenchmark {
   @Param(Array("64"))
   var chunkSize: Int = _
 
-  var chunks: IndexedSeq[Chunk[Int]] = _
+  // `AnyRef`, not `Int`: `f` is `A => ZIO[R, E1, Any]`, so `A` erases to `Object`
+  // and an `Int` element boxes on every read. `ElementTypeBenchmark` measures that
+  // at about 11% of throughput, a cost no production workload over a reference
+  // type pays. Distinct objects, so the reads do not all hit one cache line.
+  var chunks: IndexedSeq[Chunk[AnyRef]] = _
 
   @Setup
   def setup(): Unit = {
     val full = elements / chunkSize
     val rest = elements % chunkSize
     chunks =
-      (0 until full).map(i => Chunk.fromArray(Array.fill(chunkSize)(i))) ++
-        (if (rest > 0) Seq(Chunk.fromArray(Array.fill(rest)(0))) else Seq.empty)
+      (0 until full).map(_ => Chunk.fromArray(Array.fill[AnyRef](chunkSize)(new AnyRef))) ++
+        (if (rest > 0) Seq(Chunk.fromArray(Array.fill[AnyRef](rest)(new AnyRef))) else Seq.empty)
   }
 
   @Benchmark

@@ -74,12 +74,12 @@ class GroupedBatchBenchmark {
   @Param(Array("200"))
   var perElementCost: Int = _
 
-  var chunks: IndexedSeq[Chunk[Int]] = _
+  var chunks: IndexedSeq[Chunk[AnyRef]] = _
 
   @Setup
   def setup(): Unit =
     chunks = (0 until (totalElements / sourceChunkSize))
-      .map(i => Chunk.fromArray(Array.fill(sourceChunkSize)(i)))
+      .map(_ => Chunk.fromArray(Array.fill[AnyRef](sourceChunkSize)(new AnyRef)))
 
   @volatile var sink: Long = 0
 
@@ -93,21 +93,21 @@ class GroupedBatchBenchmark {
     acc
   }
 
-  private val fElement: Int => ZIO[Any, Nothing, Any] = { i =>
+  private val fElement: AnyRef => ZIO[Any, Nothing, Any] = { e =>
     ZIO.succeed {
-      val acc = burn(i.toLong, perElementCost)
+      val acc = burn(java.lang.System.identityHashCode(e).toLong, perElementCost)
       sink = acc
       acc
     }
   }
 
   /** Costs `perElementCost` per element of the batch, matching `fElement`. */
-  private val fBatch: Chunk[Int] => ZIO[Any, Nothing, Any] = { batch =>
+  private val fBatch: Chunk[AnyRef] => ZIO[Any, Nothing, Any] = { batch =>
     ZIO.succeed {
       var acc = 0L
       var idx = 0
       while (idx < batch.length) {
-        acc = burn(acc + batch(idx).toLong, perElementCost)
+        acc = burn(acc + java.lang.System.identityHashCode(batch(idx)).toLong, perElementCost)
         idx += 1
       }
       sink = acc
@@ -115,7 +115,7 @@ class GroupedBatchBenchmark {
     }
   }
 
-  private def source: ZStream[Any, Nothing, Int] = ZStream.fromChunks(chunks: _*)
+  private def source: ZStream[Any, Nothing, AnyRef] = ZStream.fromChunks(chunks: _*)
 
   /** The README's recommended shape. */
   @Benchmark

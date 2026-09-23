@@ -95,16 +95,21 @@ class BufferSizeBenchmark {
   @Param(Array("4"))
   var n: Int = _
 
-  var chunks: IndexedSeq[Chunk[Int]] = _
+  // `AnyRef`, not `Int`: `f` is `A => ZIO[R, E1, Any]`, so `A` erases to `Object`
+  // and an `Int` element boxes on every read. `ElementTypeBenchmark` measures that
+  // at about 11% of throughput in this configuration, which is a cost no
+  // production workload over a reference type pays. Distinct objects rather than
+  // one repeated, so the reads do not all hit one cache line.
+  var chunks: IndexedSeq[Chunk[AnyRef]] = _
 
   @Setup
   def setup(): Unit =
-    chunks = (0 until (totalElements / chunkSize)).map(i => Chunk.fromArray(Array.fill(chunkSize)(i)))
+    chunks = (0 until (totalElements / chunkSize)).map(_ => Chunk.fromArray(Array.fill[AnyRef](chunkSize)(new AnyRef)))
 
   /** Consumes the producer work so the JIT cannot delete the loop. */
   @volatile var sink: Int = 0
 
-  private def source: ZStream[Any, Nothing, Int] = {
+  private def source: ZStream[Any, Nothing, AnyRef] = {
     val base = ZStream.fromChunks(chunks: _*)
     if (producerCost == 0) base
     else

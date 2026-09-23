@@ -73,18 +73,18 @@ class ChunkShapeBenchmark {
   @Param(Array("200"))
   var perElementCost: Int = _
 
-  var chunks: IndexedSeq[Chunk[Int]] = _
+  var chunks: IndexedSeq[Chunk[AnyRef]] = _
 
   @Setup
   def setup(): Unit =
     chunks = (0 until (totalElements / sourceChunkSize))
-      .map(i => Chunk.fromArray(Array.fill(sourceChunkSize)(i)))
+      .map(_ => Chunk.fromArray(Array.fill[AnyRef](sourceChunkSize)(new AnyRef)))
 
   @volatile var sink: Long = 0
 
-  private val f: Int => ZIO[Any, Nothing, Any] = { i =>
+  private val f: AnyRef => ZIO[Any, Nothing, Any] = { e =>
     ZIO.succeed {
-      var acc = i.toLong
+      var acc = java.lang.System.identityHashCode(e).toLong
       var iter = 0
       while (iter < perElementCost) {
         acc = acc * 6364136223846793005L + 1442695040888963407L
@@ -95,7 +95,7 @@ class ChunkShapeBenchmark {
     }
   }
 
-  private def source: ZStream[Any, Nothing, Int] = ZStream.fromChunks(chunks: _*)
+  private def source: ZStream[Any, Nothing, AnyRef] = ZStream.fromChunks(chunks: _*)
 
   /** The source as it comes, default `bufferSize`. The "usually no" baseline. */
   @Benchmark
