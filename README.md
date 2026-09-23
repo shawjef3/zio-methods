@@ -361,13 +361,29 @@ or slightly above a stream-free `ZIO.foreachParDiscard(...).withParallelism(n)`
 control. The dip from 16k to 40k is the runtime degrading past ~16k fibers.
 
 That holds only while `f` is slow enough to dominate. With a cheap `f` the
-combinator's own round-publish wake is the constraint, and it is severe:
+combinator's own round-publish wake becomes the constraint, and it is severe:
 `WakeHerdBenchmark` measures throughput at `n = 16384` as 0.9% of the `n = 4`
 figure with 16-element chunks, against 6.1% with 2048-element chunks. Same fiber
 count and same total work, so the difference is how many workers a round can
-occupy, which is what the wake walk scales with. `OPTIMIZATION_IDEAS.md` has the
-numbers and the candidate fixes; none is implemented yet, so high `n` with a
-cheap `f` is a regime to avoid rather than one to tune.
+occupy, which is what the wake walk scales with. **A cheap `f` wants a small
+`n`**, which the crossover section already says for a different reason.
+
+With a parking `f`, the shape this combinator is for, raising `n` still pays but
+stops paying proportionally much earlier than `n` suggests. Against the Little's
+law ideal of `n / mean_latency`, with a 200 microsecond parked `f`:
+
+| `n` | elements/s | ideal | efficiency |
+|---|---|---|---|
+| 4 | 14,480 | 20,000 | 72% |
+| 64 | 224,080 | 320,000 | 70% |
+| 1,024 | 620,060 | 5,120,000 | 12% |
+| 4,096 | 509,660 | 20,480,000 | 2.5% |
+
+Throughput peaks near `n = 1024` and declines after, so **sizing `n` beyond a few
+hundred buys progressively less and beyond ~1000 buys nothing**, well below the
+tens of thousands the high-concurrency numbers above might suggest. The cause is
+the per-round wake, and `OPTIMIZATION_IDEAS.md` has the candidate fixes; none is
+implemented.
 
 Batching does not
 engage in this regime at all — rounds hold fewer than `n * 8` elements, so the
