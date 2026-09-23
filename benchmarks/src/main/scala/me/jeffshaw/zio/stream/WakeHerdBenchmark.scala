@@ -74,7 +74,17 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
 @Fork(value = 3)
 class WakeHerdBenchmark {
 
-  /** Held constant, so every point moves the same elements. */
+  /**
+   * Elements per operation.
+   *
+   * Held constant within an `fCost`, never across one: a costly `f` has to run
+   * over fewer elements or an operation takes seconds. At 200 microseconds per
+   * element with `n = 4`, 200,000 elements is ten seconds per op, which is
+   * unusable. The runner therefore pairs each `fCost` with a suitable count, and
+   * scores are only ever compared within a single `fCost` and `totalElements`
+   * pair. The comparison that matters is always a ratio against `n = 4` inside
+   * one such pair, so differing element counts across pairs are harmless.
+   */
   @Param(Array("200000"))
   var totalElements: Int = _
 
@@ -92,15 +102,56 @@ class WakeHerdBenchmark {
   @Param(Array("4", "64", "1024", "4096", "16384"))
   var n: Int = _
 
+  /**
+   * Per-element cost of `f`, which decides whether the wake cost matters.
+   *
+   * The no-op sweep above establishes that the wake collapse is real, but with
+   * a no-op `f` coordination is 100% of the work, so it says nothing about how
+   * much the collapse costs a real workload. This axis finds where it stops
+   * mattering.
+   *
+   *   - `noop`: coordination is everything. The upper bound on the effect.
+   *   - `spin1us`, `spin10us`: on-CPU work. Note this competes for the same 4
+   *     cores as the dispatch machinery, so it conflates "work dominates
+   *     coordination" with "cores are saturated"; read it alongside the parked
+   *     rows rather than alone.
+   *   - `park200us`: `ZIO.sleep`, which yields the core. This is the shape the
+   *     README's target workload has (a database round trip, an HTTP call), and
+   *     the one that decides whether ideas 1a/1b/1c repay their complexity.
+   *     Scaled down from the README's 5 ms so a run finishes.
+   */
+  @Param(Array("noop", "spin1us", "spin10us", "park200us"))
+  var fCost: String = _
+
   var chunks: IndexedSeq[Chunk[Int]] = _
 
   @Setup
   def setup(): Unit =
     chunks = (0 until (totalElements / chunkSize)).map(i => Chunk.fromArray(Array.fill(chunkSize)(i)))
 
+  @volatile var sink: Long = 0
+
+  /** Busy-waits roughly `nanos`, consuming the result so the JIT keeps it. */
+  private def spin(nanos: Long): Unit = {
+    val deadline = java.lang.System.nanoTime() + nanos
+    var acc = 1L
+    while (java.lang.System.nanoTime() < deadline)
+      acc = acc * 6364136223846793005L + 1442695040888963407L
+    sink = acc
+  }
+
+  private def callback: Int => ZIO[Any, Nothing, Any] =
+    fCost match {
+      case "noop" => _ => Exit.unit
+      case "spin1us" => _ => ZIO.succeed(spin(1000L))
+      case "spin10us" => _ => ZIO.succeed(spin(10000L))
+      case "park200us" => _ => ZIO.sleep(200.micros)
+      case other => throw new IllegalArgumentException(s"unknown fCost: $other")
+    }
+
   @Benchmark
   def runForeachPar: Long = {
-    unsafeRun(ZStream.fromChunks(chunks: _*).runForeachPar(n)(_ => Exit.unit))
+    unsafeRun(ZStream.fromChunks(chunks: _*).runForeachPar(n)(callback))
     totalElements.toLong
   }
 }
