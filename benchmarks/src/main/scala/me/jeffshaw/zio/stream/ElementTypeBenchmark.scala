@@ -74,7 +74,7 @@ class ElementTypeBenchmark {
   @Param(Array("4"))
   var n: Int = _
 
-  @Param(Array("int", "boxed", "shared", "unit"))
+  @Param(Array("int", "boxed", "newref", "shared", "unit"))
   var elementType: String = _
 
   var intChunks: IndexedSeq[Chunk[Int]] = _
@@ -93,6 +93,13 @@ class ElementTypeBenchmark {
         refChunks = (0 until count).map { c =>
           Chunk.fromArray(Array.tabulate[AnyRef](chunkSize)(i => Integer.valueOf(1000 + c * chunkSize + i)))
         }
+      case "newref" =>
+        // A distinct `new AnyRef` per slot. Same distinctness as `boxed` without
+        // depending on staying clear of the `Integer` cache, which a later edit
+        // to the offset could silently undo. Allocated in sequence, so the heap
+        // layout is contiguous, which is closer to a freshly parsed batch than
+        // scattered boxed integers are.
+        refChunks = (0 until count).map(_ => Chunk.fromArray(Array.fill[AnyRef](chunkSize)(new AnyRef)))
       case "shared" =>
         val one = new Object
         refChunks = (0 until count).map(_ => Chunk.fromArray(Array.fill[AnyRef](chunkSize)(one)))
