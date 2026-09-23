@@ -211,6 +211,6 @@ private[stream] object Dispatcher {
    * tested, and costs one extra effect node per 512 elements — under 0.2% of
    * the per-element work even when `f` is a no-op.
    */
-  private final val TrampolineEvery = 512
+  private[stream] final val TrampolineEvery = 512
 
 }
