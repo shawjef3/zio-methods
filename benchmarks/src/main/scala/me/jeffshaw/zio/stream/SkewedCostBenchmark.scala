@@ -53,6 +53,22 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * `costRatio` is the slow-to-fast cost ratio. A ratio of 1 is the uniform
  * control, which should show no effect from the cap at all.
  *
+ * ==Calibration, which took two attempts==
+ *
+ * The costs have to be large relative to dispatch or this measures dispatch
+ * instead of the tail. A first version used `fastCostIters = 200` with a nominal
+ * 50x ratio, and the skew showed up as only 1.35x against the 4.07x the element
+ * distribution implies. Timing the burn loop alone explained it: 200 iterations
+ * costs about 5.5ns while per-element dispatch is roughly 19ns, so `f` was 22% of
+ * the work and the mean could not move much whatever the tail did. The loop was
+ * not being eliminated, merely dwarfed.
+ *
+ * Hence `fastCostIters = 20000` (about 284ns, roughly fifteen times dispatch)
+ * and a 20x ratio (about 5.7us per slow element). A stride-256 claim landing
+ * entirely on slow elements then serializes roughly 1.5ms, which is the tail the
+ * cap exists to bound, while at stride 16 the same cluster spreads over sixteen
+ * claims that peers can take.
+ *
  * ==How to read it==
  *
  * Run against `MaxStride = 16` and `MaxStride = 256`. The prediction the cap
@@ -69,7 +85,11 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
 @Fork(value = 3)
 class SkewedCostBenchmark {
 
-  @Param(Array("200000"))
+  /**
+   * Reduced from 200,000 because `fastCostIters` went up 100x: an operation has
+   * to stay short enough to measure.
+   */
+  @Param(Array("20000"))
   var totalElements: Int = _
 
   /**
@@ -86,12 +106,21 @@ class SkewedCostBenchmark {
   @Param(Array("4", "256"))
   var n: Int = _
 
-  /** Baseline per-element work, in multiply-add iterations. */
-  @Param(Array("200"))
+  /**
+   * Baseline per-element work, in multiply-add iterations.
+   *
+   * 20,000, not 200. Calibrated against a measured dispatch overhead of roughly
+   * 19ns per element: at 200 iterations the loop costs about 5.5ns, so `f` was
+   * only 22% of the work and the mean was dominated by dispatch rather than by
+   * `f`, which is why a nominal 50x cost ratio showed up as 1.35x. At 20,000 the
+   * fast element costs about 284ns, roughly fifteen times dispatch, so the tail
+   * can actually dominate.
+   */
+  @Param(Array("20000"))
   var fastCostIters: Int = _
 
   /** How much more the slow elements cost. 1 is the uniform control. */
-  @Param(Array("1", "50"))
+  @Param(Array("1", "20"))
   var costRatio: Int = _
 
   /**
@@ -108,14 +137,16 @@ class SkewedCostBenchmark {
   var chunks: IndexedSeq[Chunk[Int]] = _
 
   /**
-   * Elements carry their own cost, so `f` needs no index arithmetic and cannot
-   * be accidentally uniform. A positive value is fast, negative is slow.
+   * Each element is its own index, negated when it should be slow. The sign
+   * carries the fast/slow decision while the magnitude stays unique per element,
+   * which keeps the burn loop's seed varying so the JIT cannot fold it into two
+   * cached results.
    */
   @Setup
   def setup(): Unit = {
     val costs = Array.tabulate(totalElements) { i =>
-      val posInCycle = i % slowEvery
-      if (posInCycle < slowRunLength) -1 else 1
+      val v = i + 1
+      if ((i % slowEvery) < slowRunLength) -v else v
     }
     chunks = (0 until (totalElements / chunkSize)).map { c =>
       Chunk.fromArray(costs.slice(c * chunkSize, (c + 1) * chunkSize))
@@ -124,8 +155,19 @@ class SkewedCostBenchmark {
 
   @volatile var sink: Long = 0
 
-  private def burn(iterations: Int): Unit = {
-    var acc = 1L
+  /**
+   * Burns `iterations` multiply-adds seeded from `seed`, writing the result to a
+   * `@volatile` field so the loop cannot be proved dead.
+   *
+   * The seed has to vary per call. An earlier version started from a literal, and
+   * the JIT evidently collapsed the loop: a nominal 50x cost ratio produced a
+   * measured mean multiplier of 1.24x against the 4.07x the element distribution
+   * implies, so the "skewed" configuration was barely skewed and the benchmark was
+   * not measuring what it claimed. `CrossoverBenchmark` seeds from the element
+   * value for the same reason, and its sweep scales as expected.
+   */
+  private def burn(seed: Long, iterations: Int): Unit = {
+    var acc = seed
     var i = 0
     while (i < iterations) {
       acc = acc * 6364136223846793005L + 1442695040888963407L
@@ -137,7 +179,9 @@ class SkewedCostBenchmark {
   private def callback: Int => ZIO[Any, Nothing, Any] = {
     val fast = fastCostIters
     val slow = fastCostIters * costRatio
-    marker => ZIO.succeed(burn(if (marker < 0) slow else fast))
+    // The element is the seed as well as the fast/slow marker, so successive
+    // calls cannot share a folded result.
+    marker => ZIO.succeed(burn(marker.toLong, if (marker < 0) slow else fast))
   }
 
   @Benchmark

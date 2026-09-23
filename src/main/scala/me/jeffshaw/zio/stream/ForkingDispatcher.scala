@@ -287,9 +287,7 @@ private[stream] object ForkingDispatcher {
       // interrupted when the run tears down.
       Queue.bounded[Unit](n).flatMap { permits =>
         permits.offerAll(Chunk.fill(n)(())) *>
-          ZIO.scopedWith(scope =>
-            new ForkingDispatcher[R, E, E1, A](fibers, permits, scope, fetch, f, onError).run
-          )
+          ZIO.scopedWith(scope => new ForkingDispatcher[R, E, E1, A](fibers, permits, scope, fetch, f, onError).run)
       }
     }
 }
