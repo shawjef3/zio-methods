@@ -35,7 +35,7 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * `RealisticParBenchmark` has a 5ms `f` that swamps everything.
  *
  * The knob here is `chunkSize`. Small chunks mean many rounds over the same
- * element count, so per-round cost scales up against a fixed amount of work —
+ * element count, so per-round cost scales up against a fixed amount of work:
  * which is exactly the ratio a change to `fetch` moves. `f` is a no-op so
  * nothing else competes.
  *

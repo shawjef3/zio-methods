@@ -19,9 +19,9 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * efficiency).
  *
  * `f` is modeled two ways:
- *   - `sleep`: `ZIO.sleep(5.millis)` — an async wait (IO-ish). Exercises the
+ *   - `sleep`: `ZIO.sleep(5.millis)`, an async wait (IO-ish). Exercises the
  *     ZIO timer/scheduler wake-up path at high fiber counts.
- *   - `spin`: 5ms of CPU burn — a compute-bound `f`. Ideal is bounded by
+ *   - `spin`: 5ms of CPU burn, a compute-bound `f`. Ideal is bounded by
  *     physical cores regardless of `n`.
  */
 @State(JScope.Benchmark)
@@ -86,7 +86,7 @@ class RealisticParBenchmark {
 
   /**
    * Control: the same total work and concurrency bound with no stream and no
-   * distributor — `foreachParDiscard` straight over the elements. This is the
+   * distributor: `foreachParDiscard` straight over the elements. This is the
    * ZIO-runtime-native ceiling for "run 200k 5ms sleeps, at most n at once".
    * If this plateaus at the same rate as `runForeachParSleep`, the bottleneck
    * is the runtime's fiber/timer machinery, not the chunk-cursor protocol.

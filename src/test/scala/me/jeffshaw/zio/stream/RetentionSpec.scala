@@ -27,8 +27,8 @@ import java.lang.ref.WeakReference
  * by the worker closures for the whole run. If a drained round keeps its chunk,
  * the seed transitively pins every chunk the run has ever pulled, so retention
  * grows with the length of the stream instead of being bounded by `bufferSize`.
- * That is invisible to correctness tests — every element is still visited
- * exactly once — and shows up only as an OOM on a long stream with large
+ * That is invisible to correctness tests (every element is still visited
+ * exactly once) and shows up only as an OOM on a long stream with large
  * elements.
  *
  * These tests measure reachability directly with weak references. The run is

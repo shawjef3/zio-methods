@@ -56,8 +56,8 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
     round.next.done(Exit.succeed(next)).unit
 
   // Releases a round's chunk once it can hand out no more elements. Only the
-  // designated fetcher calls this, and only after it has been elected — which
-  // happens only once the cursor is at or past the end — so every element has
+  // designated fetcher calls this, and only after it has been elected, which
+  // happens only once the cursor is at or past the end, so every element has
   // already been claimed.
   //
   // Workers still working through a claim do not touch `chunk` again: `loop`
@@ -73,7 +73,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   // Runs `f` over one claimed range `[i, until)` of `chunk`, then returns to
   // the cursor for the next claim. Elements within a claim are chained
   // directly, so a claim of `stride` elements costs one atomic operation
-  // rather than `stride` of them — the point of the whole exercise.
+  // rather than `stride` of them, which is the point of the whole exercise.
   //
   // `chunk` is passed in rather than re-read from the round: the fetcher may
   // null the field at any time after the boundary, and this range was
@@ -93,16 +93,16 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   // Whether this worker is the round's designated fetcher.
   //
   // At stride 1 the bases are consecutive, so exactly one worker lands on
-  // `length` and the implicit test elects it with no atomic of its own — the
+  // `length` and the implicit test elects it with no atomic of its own: the
   // original protocol, unchanged. Only a stride above 1 skips bases, and only
   // there is the CAS needed; those rounds are by construction large enough to
   // absorb one atomic apiece.
   //
   // `chunk ne null` keeps a released round from re-electing: a worker that
   // re-enters `loop` on one goes to the await branch instead. For a batched
-  // round the CAS would also refuse it — `release` runs only after the winner
-  // has published, so `fetching` is already true by the time the chunk is
-  // nulled — which makes the guard belt and braces there, and the sole
+  // round the CAS would also refuse it, since `release` runs only after the
+  // winner has published, so `fetching` is already true by the time the chunk
+  // is nulled. That makes the guard belt and braces there, and the sole
   // protection on the stride-1 path, where there is no flag to fall back on.
   private def isFetcher(round: Round[E, A], chunk: Chunk[A], i: Int, length: Int, stride: Int): Boolean =
     (chunk ne null) && (if (stride == 1) i == length else round.fetching.compareAndSet(false, true))
@@ -142,7 +142,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   // non-overlapping error bars. Throughput is the objective and allocation
   // only a diagnostic, so the recursive loop wins. The per-iteration graph
   // rebuilding that `whileLoop` avoids is evidently cheap enough for the
-  // JIT to handle — consistent with hoisting the worker closures out of the
+  // JIT to handle, consistent with hoisting the worker closures out of the
   // loop also measuring as a no-op. Don't retry either without a benchmark.
   def loop(round: Round[E, A], depth: Int): ZIO[R, Nothing, Unit] =
     // A terminal round only signals "stop". The cause, if any, was already
@@ -151,8 +151,8 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
     if (round.terminal) Exit.unit
     // Trampoline. `foldCauseZIO` on an already-completed `Exit` runs its
     // continuation *inline* rather than returning to the ZIO interpreter, so
-    // when `f` does not suspend — `Exit.unit`, `ZIO.succeed`, any pure
-    // computation — the whole `loop`/`runClaim` cycle is ordinary JVM
+    // when `f` does not suspend (`Exit.unit`, `ZIO.succeed`, any pure
+    // computation), the whole `loop`/`runClaim` cycle is ordinary JVM
     // recursion and the stack grows with the round, not with the claim.
     // `MaxStride` bounds a single claim; it does not bound this.
     // Measured before the fix: a single 200k-element chunk with a no-op `f`
@@ -183,7 +183,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
         // The claimed elements are read out of the local `chunk` before `f`
         // runs, so `f` never reaches back into the round. A stride-1 claim
         // covers a single element, so it goes straight to `f` and skips
-        // `runClaim`'s range bookkeeping entirely — that path is then exactly
+        // `runClaim`'s range bookkeeping entirely, so that path is then exactly
         // the pre-batching loop, and stays inline here so it gains no frame.
         if (stride == 1) f(chunk(i)).foldCauseZIO(onError, _ => loop(round, depth + 1))
         else runClaim(round, chunk, i, (i + stride) min length, depth)
@@ -199,8 +199,8 @@ private[stream] object Dispatcher {
    * the ZIO interpreter, unwinding the JVM stack.
    *
    * `foldCauseZIO` on an already-completed `Exit` invokes its continuation
-   * inline, so a synchronous `f` — `Exit.unit`, `ZIO.succeed`, any pure
-   * computation — turns the `loop`/`runClaim` cycle into plain JVM recursion
+   * inline, so a synchronous `f` (`Exit.unit`, `ZIO.succeed`, any pure
+   * computation) turns the `loop`/`runClaim` cycle into plain JVM recursion
    * whose depth is the length of the round. Measured before this existed: a
    * single 200,000-element chunk with a no-op `f` overflows a 512KB stack, and
    * the `StackOverflowError` escapes as a fiber defect rather than something a
@@ -208,7 +208,7 @@ private[stream] object Dispatcher {
    * existing tests and the I/O-shaped benchmarks never hit it.
    *
    * 512 sits ~200x below the measured overflow point on the smallest stack
-   * tested, and costs one extra effect node per 512 elements — under 0.2% of
+   * tested, and costs one extra effect node per 512 elements, under 0.2% of
    * the per-element work even when `f` is a no-op.
    */
   private final val TrampolineEvery = 512

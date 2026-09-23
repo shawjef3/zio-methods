@@ -101,7 +101,7 @@ package object stream {
               // per chunk, not per element), while workers dispatch individual
               // elements out of the current chunk via a shared atomic cursor
               // (`ChunkCursorDistributor`). This bounds concurrency at the element
-              // level — matching `mapZIOParUnordered` — without a chunk boundary
+              // level (matching `mapZIOParUnordered`) without a chunk boundary
               // barrier, and without the per-element `Exit.Success` boxing of an
               // element-granular queue.
               queue <- Queue.bounded[Take[E, A]](bufferSizeV)

@@ -29,7 +29,7 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * selection guide can name a number rather than gesture at one.
  *
  * The other benchmarks fix `f` and vary the combinator. This one fixes the
- * combinators — `runForeachPar` against sequential `runForeach` — and sweeps the
+ * combinators (`runForeachPar` against sequential `runForeach`) and sweeps the
  * per-element cost of `f`, because the crossover is the only thing a caller
  * choosing between them actually needs to know.
  *

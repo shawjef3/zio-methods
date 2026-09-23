@@ -179,7 +179,7 @@ class StreamParBenchmark {
   // producer the limiting stage rather than the workers.
   //
   // What this does NOT reproduce is the queue-less design's collapse, which
-  // needs a pull that *suspends* — see the blocking-upstream benchmark below.
+  // needs a pull that *suspends*; see the blocking-upstream benchmark below.
   // A slow on-CPU pull and a parked one both keep the fetcher from running `f`,
   // but only the parked one costs a scheduler wake to resume, and only it was
   // measured to sink the queue-less shape. Keeping both benchmarks is what
@@ -222,7 +222,7 @@ class StreamParBenchmark {
   // and a regression guard for the producer-fiber + queue design.
   //
   // A source that cannot keep up with the workers is the precondition, and
-  // `slowUpstream` above already supplies it — its producer is the limiting
+  // `slowUpstream` above already supplies it: its producer is the limiting
   // stage from `upstreamCost = 200` on. What that benchmark lacks is a pull
   // that *suspends*: its cost is burned on-CPU, so the pulling fiber is busy
   // rather than parked, and it does not reproduce the queue-less collapse.

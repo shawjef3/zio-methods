@@ -239,7 +239,7 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         // 1 and so only exercises per-element dispatch. Here the chunk is far
         // larger than `n`, putting the stride above 1: batched claims must still
         // reach every worker. They do because the stride leaves each worker
-        // several claims rather than exactly one — the property `ClaimsPerWorker`
+        // several claims rather than exactly one: the property `ClaimsPerWorker`
         // exists to guarantee, and the one a stride sized to `length / n` would
         // lose.
         val n = 16
@@ -259,7 +259,7 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("claims partition the chunk at every length/n ratio") {
         // The stride is derived from `length / (n * ClaimsPerWorker)`, so
-        // different length/n ratios exercise different strides — including the
+        // different length/n ratios exercise different strides, including the
         // ratios where `length` is not a multiple of the stride and the final
         // claim is short. Across all of them the claimed ranges must still
         // partition the chunk: every element exactly once, none twice, none
@@ -288,7 +288,7 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
           } yield assertTrue(res.size == length) &&
             assertTrue(res.values.forall(_ == 1)) &&
             // Exactly one fetcher per round, so one pull for the chunk and one
-            // for the terminal — never zero (a lost election hangs) and never two.
+            // for the terminal: never zero (a lost election hangs) and never two.
             assertTrue(fetches == 2)
         }
       } @@ nonFlaky(20),

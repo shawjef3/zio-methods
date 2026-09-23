@@ -40,7 +40,7 @@ import zio.test.TestAspect.nonFlaky
  *   - the failure values and defect messages, counted by occurrence, so that
  *     reporting one logical failure several times is caught;
  *   - whether the cause is interruption-only, and whether it is empty;
- *   - which elements `f` was applied to, as a multiset — but only on the
+ *   - which elements `f` was applied to, as a multiset, but only on the
  *     success path, for the reason below.
  *
  * ==Why `visited` is compared only on success==
@@ -55,12 +55,12 @@ import zio.test.TestAspect.nonFlaky
  * So on the failure path this compares everything except `visited` exactly, and
  * holds `visited` to the invariants that *are* guaranteed: no element visited
  * twice, and no element visited that the stream never emitted. Comparing the
- * two subsets for equality would not test parity — it would test whether two
+ * two subsets for equality would not test parity: it would test whether two
  * independent runs lost the same race, which base against itself would also
  * fail.
  *
  * Deliberately not compared: `Cause` tree shape and failure ordering. Those
- * differ run to run in both implementations — concurrent failures race — so
+ * differ run to run in both implementations (concurrent failures race), so
  * asserting on them would pin ZIO internals and produce flakiness rather than
  * signal.
  */
@@ -91,8 +91,8 @@ object DifferentialSpec extends ZIOSpecDefault {
       failures = tally(cause.toList.flatMap(_.failures)),
       defects = tally(cause.toList.flatMap(_.defects).map(_.getMessage)),
       interruptedOnly = cause.exists(_.isInterruptedOnly),
-      // Distinguishes "failed with no recorded cause" — what both produce when
-      // every worker was merely interrupted — from a cause carrying interrupts.
+      // Distinguishes "failed with no recorded cause", what both produce when
+      // every worker was merely interrupted, from a cause carrying interrupts.
       causeEmpty = cause.exists(_.isEmpty)
     )
   }
@@ -151,8 +151,8 @@ object DifferentialSpec extends ZIOSpecDefault {
       normalize = (o: Outcome) => if (countFailures) o else dropCounts(o)
     } yield
       if (base.succeeded && ours.succeeded)
-        // No interruption on the success path — `workerFiber.join` waits for
-        // every worker — so `visited` is a sound observable and the two runs
+        // No interruption on the success path (`workerFiber.join` waits for
+        // every worker), so `visited` is a sound observable and the two runs
         // must agree on it exactly.
         assertTrue(normalize(ours) == normalize(base))
       else {

@@ -32,12 +32,12 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * chunks":
  *
  *   1. "going from one round per worker-pass to four matters and from forty to
- *      a hundred and sixty does not" — i.e. the return on `bufferSize` is steeply
+ *      a hundred and sixty does not", i.e. the return on `bufferSize` is steeply
  *      diminishing. The sweep is geometric (1, 4, 16, 64) so the early and late
  *      steps are the same multiple and directly comparable.
  *   2. "the queue only ever holds what the producer has actually produced [...]
  *      so raising `bufferSize` past what the source can stay ahead of buys
- *      nothing" — which is a claim about the *interaction* with producer speed,
+ *      nothing", which is a claim about the *interaction* with producer speed,
  *      not about `bufferSize` alone. `producerCost` supplies the second axis:
  *      at 0 the in-memory source is fast and a large buffer can actually fill,
  *      while at 2000 the producer is the limiting stage and the claim predicts

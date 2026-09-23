@@ -30,7 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * moved cheaply through the queue (one box per chunk, not per element), but every
  * worker claims individual elements out of the current chunk via a shared atomic
  * cursor, so any number of workers can be busy on the same chunk. In particular a
- * single chunk of `>= n` elements keeps all `n` workers busy — the failure mode
+ * single chunk of `>= n` elements keeps all `n` workers busy, the failure mode
  * that a whole-chunk-per-worker design suffers from.
  *
  * ==Protocol==
@@ -57,13 +57,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * elements, which is what the dispatch loop's cost is dominated by once `f` is
  * cheap. It is derived per round from `length / (n * ClaimsPerWorker)`, so it
  * engages only for rounds far larger than `n` and always leaves every worker
- * several claims — the load balance a single shared cursor exists to provide is
+ * several claims, since the load balance a single shared cursor exists to provide is
  * preserved, and a chunk of `>= n` elements still reaches all `n` workers.
  * Below that threshold the stride is 1 and dispatch is exactly per-element.
  *
  * The stride also decides how the fetcher is elected. At stride 1 the bases are
  * consecutive, so exactly one worker sees `i == length` and that test elects it
- * with no extra atomic — the original protocol, unchanged. A larger stride makes
+ * with no extra atomic: the original protocol, unchanged. A larger stride makes
  * the bases skip, so none need land on `length` at all and the same test would
  * elect nobody and hang the run; those rounds elect by CAS on `fetching`
  * instead, which costs one atomic per round on rounds that are by construction
@@ -80,7 +80,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * A terminal round carries no cause. The cause of a failing terminal is reported
  * to `onError` once, by the fetcher that pulled it, so a single upstream failure
- * produces a single cause however large `n` is — matching
+ * produces a single cause however large `n` is, matching
  * [[zio.stream.ZChannel#mapOutZIOParUnordered]], where the lone pull loop plays
  * the same role.
  *

@@ -73,12 +73,12 @@ class SingleWorkerBenchmark {
    * configuration, and JMH would measure that duplicate as if it were a
    * distinct point.
    *
-   *   - `free`   — in-memory source. The topology has nothing to overlap, so
-   *                `n == 1` should be pure overhead against `runForeach`.
-   *   - `onCpu`  — per-chunk spin. Overlap exists but competes for the same
-   *                core, which on a 4-core host makes it partly fictional.
-   *   - `parked` — per-chunk `ZIO.sleep`. The producer genuinely yields the
-   *                core, so this is where the claimed overlap should pay.
+   *   - `free`  : in-memory source. The topology has nothing to overlap, so
+   *               `n == 1` should be pure overhead against `runForeach`.
+   *   - `onCpu` : per-chunk spin. Overlap exists but competes for the same
+   *               core, so on a core-starved host it is partly fictional.
+   *   - `parked`: per-chunk `ZIO.sleep`. The producer genuinely yields the
+   *               core, so this is where the claimed overlap should pay.
    */
   @Param(Array("free", "onCpu", "parked"))
   var producer: String = _

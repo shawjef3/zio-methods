@@ -35,7 +35,7 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * `applyOnExitWith`, and walked every fiber calling `inheritAll` at shutdown.
  *
  * To make that visible, the *stream* is kept deliberately tiny while `n` grows.
- * Every other benchmark does the opposite — lots of elements, modest `n` — which
+ * Every other benchmark does the opposite (lots of elements, modest `n`), which
  * amortizes startup into invisibility. Here a run is dominated by pool setup and
  * teardown, so a change to either shows up directly.
  *

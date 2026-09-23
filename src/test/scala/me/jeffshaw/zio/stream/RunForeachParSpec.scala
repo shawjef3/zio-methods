@@ -247,7 +247,7 @@ object RunForeachParSpec extends ZIOSpecDefault {
         // The relaxed assertion above cannot distinguish accumulation
         // (`failure.unsafe.update(_ && cause)`) from replacement: keeping only
         // the first failure also yields a one-element subset. Accumulation is
-        // instead pinned as a *reachability* property — recording both is a
+        // instead pinned as a *reachability* property; recording both is a
         // possible outcome, which a keep-first implementation could never
         // produce, so the retry would exhaust its bound and fail.
         val attempt =
@@ -284,8 +284,9 @@ object RunForeachParSpec extends ZIOSpecDefault {
         }
       },
       test("n == 1 visits every element exactly once") {
-        // `n == 1` takes the forked path, so element order is not guaranteed —
-        // only that every element is visited exactly once, under both overloads.
+        // `n == 1` takes the forked path, so element order is not guaranteed.
+        // All this asserts is that every element is visited exactly once, under
+        // both overloads.
         val total = 500
         checkAll(Gen.fromIterable(Chunk(1, 16))) { bufferSize =>
           for {
@@ -318,7 +319,7 @@ object RunForeachParSpec extends ZIOSpecDefault {
         // The reason `n == 1` no longer degrades to `runForeach`: the producer
         // fills the buffer while `f` runs. With a buffer of 8 and a gated `f`,
         // the stream must be pulled well past the first element before the
-        // first invocation of `f` is allowed to complete — which cannot happen
+        // first invocation of `f` is allowed to complete, which cannot happen
         // if pulling and `f` share one fiber.
         for {
           pulled <- Ref.make(0)

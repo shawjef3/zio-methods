@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * Why: when `n` is much larger than the chunk size, a round has fewer elements
  * than workers, and every round publish wakes all overflow workers at once to
- * race for the next chunk — measured at ~28% of throughput at n = 16k-40k with
+ * race for the next chunk, measured at ~28% of throughput at n = 16k-40k with
  * 2000-element chunks (5ms IO-like `f`). Fusing multiplies elements per round by
  * the number of buffered chunks, making the wake-herd boundary proportionally
  * rarer, while dispatch stays element-granular so load balance and the
