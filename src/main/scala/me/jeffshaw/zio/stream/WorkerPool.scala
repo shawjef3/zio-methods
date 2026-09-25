@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * finishes.
  *
  * This replaces `ZIO.foreachParDiscard(1 to n)(...).withParallelism(n)` in
- * [[ChunkCursorDistributor]], and is derived from the implementation that call
+ * [[Dispatcher.run]], and is derived from the implementation that call
  * resolves to: ZIO 2.1.26's private `ZIO.foreachParUnboundedDiscard`, selected
  * because `parallelism == size`.
  *
@@ -57,14 +57,19 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * ==How this was arrived at==
  *
- * [[ChunkCursorDistributor]] starts every worker on a shared, single-use
- * election point (see the precondition on [[ChunkCursorDistributor.run]]), and
- * four hand-written fork loops broke it before the cause was found. What
- * worked was copying `foreachParUnboundedDiscard` verbatim into `package zio`,
- * where its `private[zio]` dependencies are reachable, confirming the copy
- * passed the suite, then removing one piece at a time and re-running. That
- * identified `forkDaemon`, rather than anything about scheduling, as the part
- * that mattered.
+ * Four hand-written fork loops failed the suite before this. What worked was
+ * copying `foreachParUnboundedDiscard` verbatim into `package zio`, where its
+ * `private[zio]` dependencies are reachable, confirming the copy passed the
+ * suite, then removing one piece at a time and re-running.
+ *
+ * Those failures were once blamed on `forkDaemon` breaking fetcher election on
+ * the shared seed round. That cannot be the mechanism: the election is correct
+ * in any arrival order (see the seed in [[Dispatcher]]). A more likely cause is
+ * that `Dispatcher.loop` claims from the cursor when it is called, so a loop
+ * that built the worker effect once and forked it `n` times made every worker
+ * the seed's fetcher. `worker` is by-name here, and [[Dispatcher.run]] passes a
+ * suspended effect, so neither can happen now. The fork mode matters only for
+ * interruption, as above.
  *
  * ==What it is worth==
  *
@@ -79,7 +84,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * So this exists to stop holding ~40,960 fiber objects for the length of a run,
  * and that is not something the benchmarks measure. `RetentionSpec` covers
- * *element* retention only, so nothing currently guards it.
+ * element and round retention, not fibers, so nothing currently guards it.
  *
  * ==Reduction to public API==
  *

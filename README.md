@@ -178,6 +178,7 @@ dispatch tuning can do.
   and because interruption is not instantaneous, more than one failure can be
   recorded. The effect fails with all of them combined (`Cause.Both`), not
   with whichever was first. Match on the cause accordingly.
+- **`bufferSize <= 0` is treated as 1**, not rejected, matching how `ZIO.foreachParDiscard` degrades a non-positive parallelism instead of failing.
 - **`n <= 0` degrades to sequential** `runForeach`, ignoring `bufferSize`.
   `n == 1` does *not*: it keeps the worker topology, so the stream is still
   consumed concurrently with `f`. That topology is not free, and its payoff is

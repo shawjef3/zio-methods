@@ -283,6 +283,19 @@ object RunForeachParSpec extends ZIOSpecDefault {
           } yield assertTrue(res == Chunk.fromIterable(0 until 100))
         }
       },
+      test("non-positive bufferSize is treated as 1") {
+        // `Queue.bounded` dies on a non-positive capacity; the clamp keeps a
+        // degenerate argument graceful, as `n <= 0` already is.
+        checkAll(Gen.fromIterable(Chunk(-1, 0))) { bufferSize =>
+          for {
+            counts <- Ref.make(Map.empty[Int, Int])
+            _ <- ZStream
+              .range(0, 200, chunkSize = 8)
+              .runForeachPar(4, bufferSize)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+            res <- counts.get
+          } yield assertTrue(res.size == 200) && assertTrue(res.values.forall(_ == 1))
+        }
+      },
       test("n == 1 visits every element exactly once") {
         // `n == 1` takes the forked path, so element order is not guaranteed.
         // All this asserts is that every element is visited exactly once, under

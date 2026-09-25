@@ -68,7 +68,9 @@ class StreamParBenchmark {
       .fromChunks(zioChunks: _*)
       .runForeachChunk { chunk =>
         ZIO
-          .foreachParDiscard(chunk)(e => ZIO.succeed(BigDecimal.valueOf(java.lang.System.identityHashCode(e).toLong).pow(3)))
+          .foreachParDiscard(chunk)(e =>
+            ZIO.succeed(BigDecimal.valueOf(java.lang.System.identityHashCode(e).toLong).pow(3))
+          )
           .withParallelism(4)
       }
 
@@ -186,31 +188,28 @@ class StreamParBenchmark {
   // separates "producer is slow" from "producer parks".
   // ---------------------------------------------------------------------------
 
-  @Param(Array("0", "50", "200"))
-  var upstreamCost: Int = _
-
-  /** Consumes the producer work so it cannot be optimized away. */
-  @volatile var sink: Int = 0
-
   /**
    * Per-chunk producer work. The accumulator is consumed via `sink` (a
    * `@volatile` field) so the JIT cannot prove it dead and delete the loop.
    */
-  private def slowUpstream(s: ZStream[Any, Nothing, AnyRef]): ZStream[Any, Nothing, AnyRef] =
+  private def slowUpstream(
+    s: ZStream[Any, Nothing, AnyRef],
+    p: StreamParSlowUpstreamParams
+  ): ZStream[Any, Nothing, AnyRef] =
     s.mapChunks { chunk =>
       var acc = chunk.length
       var i = 0
-      while (i < upstreamCost) {
+      while (i < p.upstreamCost) {
         acc = acc * 31 + i
         i += 1
       }
-      sink = acc
+      p.sink = acc
       chunk
     }
 
   @Benchmark
-  def zioRunForeachParSlowUpstream: Long = {
-    val result = slowUpstream(ZStream.fromChunks(zioChunks: _*))
+  def zioRunForeachParSlowUpstream(p: StreamParSlowUpstreamParams): Long = {
+    val result = slowUpstream(ZStream.fromChunks(zioChunks: _*), p)
       .runForeachPar(4)(_ => Exit.unit)
 
     unsafeRun(result)
@@ -241,20 +240,18 @@ class StreamParBenchmark {
   // The source is a bounded `Queue` fed by a forked producer, so `queue.take`
   // genuinely suspends the fiber rather than spinning.
   //
-  // `producerDelayNanos` sets how long the producer waits between chunks. It is
-  // spent in `ZIO.sleep`, which parks rather than spins; 0 means "as fast as the
-  // producer can offer", which still parks the consumer whenever it out-runs it.
+  // `producerDelayNanos` (on `StreamParBlockingUpstreamParams`) sets how long
+  // the producer waits between chunks. It is spent in `ZIO.sleep`, which parks
+  // rather than spins; 0 means "as fast as the producer can offer", which still
+  // parks the consumer whenever it out-runs it.
   // ---------------------------------------------------------------------------
-
-  @Param(Array("0", "10000", "100000"))
-  var producerDelayNanos: Long = _
 
   /**
    * A stream backed by a bounded queue fed by a separate fiber, so pulling
    * parks the puller when the queue is empty. `bufferChunks` is deliberately
    * small so the consumer can out-run the producer and actually block.
    */
-  private def blockingUpstream: ZStream[Any, Nothing, AnyRef] = {
+  private def blockingUpstream(producerDelayNanos: Long): ZStream[Any, Nothing, AnyRef] = {
     val bufferChunks = 4
     ZStream.unwrapScoped {
       for {
@@ -270,10 +267,33 @@ class StreamParBenchmark {
   }
 
   @Benchmark
-  def zioRunForeachParBlockingUpstream: Long = {
-    val result = blockingUpstream.runForeachPar(4)(_ => Exit.unit)
+  def zioRunForeachParBlockingUpstream(p: StreamParBlockingUpstreamParams): Long = {
+    val result = blockingUpstream(p.producerDelayNanos).runForeachPar(4)(_ => Exit.unit)
 
     unsafeRun(result)
     zioChunks.length.toLong * parChunkSize
   }
+}
+
+// The two upstream parameters live in their own states, passed only to the
+// benchmark that reads each. On `StreamParBenchmark` itself they multiplied
+// every method in the class by 3 x 3 combinations, so a run without `-p`
+// measured each of the nine methods that read neither parameter nine times.
+// The benchmark names, and the `-p` names, are unchanged.
+
+@State(JScope.Benchmark)
+class StreamParSlowUpstreamParams {
+
+  @Param(Array("0", "50", "200"))
+  var upstreamCost: Int = _
+
+  /** Consumes the producer work so it cannot be optimized away. */
+  @volatile var sink: Int = 0
+}
+
+@State(JScope.Benchmark)
+class StreamParBlockingUpstreamParams {
+
+  @Param(Array("0", "10000", "100000"))
+  var producerDelayNanos: Long = _
 }

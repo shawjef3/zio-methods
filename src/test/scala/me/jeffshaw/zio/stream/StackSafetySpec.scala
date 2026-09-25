@@ -21,13 +21,14 @@ import zio.stream._
 import zio.test._
 
 /**
- * Guards the dispatch loop against stack overflow when `f` does not suspend.
+ * Guards the dispatch loop against stack overflow when `f` returns an `Exit`.
  *
- * `foldCauseZIO` on an already-completed `Exit` runs its continuation inline
- * rather than returning to the ZIO interpreter, so a synchronous `f` makes the
+ * `Exit` overrides `foldCauseZIO` to run its continuation inline rather than
+ * returning to the ZIO interpreter, so an `f` such as `_ => Exit.unit` makes the
  * `loop`/`runClaim` cycle ordinary JVM recursion whose depth is the length of
  * the round rather than of a claim. `Round.MaxStride` bounds a claim and does
- * not bound this.
+ * not bound this. Other synchronous effects, `ZIO.succeed` among them, are
+ * evaluated by the interpreter's own loop and do not recurse.
  *
  * These tests run on a thread with an explicitly small stack, because the
  * default `zio-test` fiber stack is generous enough to hide the bug: before the

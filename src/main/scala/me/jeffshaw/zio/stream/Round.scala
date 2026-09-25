@@ -28,13 +28,14 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
  *
  * `chunk` is a `var` so a drained round can release it. Rounds are linked
  * forward through `next` (round k's promise resolves to round k+1), so a
- * reference to any one round transitively reaches every later round. The seed
- * round is held by the [[Dispatcher]] for the whole run, so without
- * releasing, every chunk the run has ever pulled stays reachable: retention
- * grows with the length of the stream rather than being bounded by
- * `bufferSize`. Clearing the field once the round can hand out no more
- * elements keeps the small round objects chained while letting the large
- * payload go.
+ * reference to any one round transitively reaches every later round. A worker
+ * whose `f` is slow to return still holds the round it claimed from, so
+ * without releasing, every chunk pulled since then would stay reachable for as
+ * long as that `f` runs, and retention would grow with the stream rather than
+ * being bounded by `bufferSize`. Clearing the field once the round can hand
+ * out no more elements lets the large payload go while the small round objects
+ * stay chained. Those are freed once nothing holds an early round, which is
+ * why [[Dispatcher]] does not keep the seed for the whole run.
  */
 private[stream] final class Round[E, A](
   @volatile var chunk: Chunk[A],
@@ -178,13 +179,14 @@ private[stream] object Round {
     // A terminal round's `next` is never awaited: `loop` checks `terminal`
     // before touching the cursor, so a worker that loops onto a terminal round
     // stops immediately, and a worker awaiting the *previous* round's `next`
-    // receives this round and then hits that same check. The promise is
-    // therefore never completed and never read; it exists only to fill the
-    // field.
+    // receives this round and then hits that same check. Its cursor and
+    // promise are therefore never read, so they are left null: a change that
+    // did read them would fail loudly rather than wait on a promise nobody
+    // completes.
     new Round[E, A](
       Chunk.empty,
-      new AtomicInteger(0),
-      makePromise[E, A],
+      null,
+      null,
       terminal = true,
       stride = 1,
       fetching = null

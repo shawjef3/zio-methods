@@ -20,12 +20,15 @@ import zio._
 import zio.stream.Take
 import zio.stacktracer.TracingImplicits.disableAutoTrace
 
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
+
 /**
  * The dispatch loop for one run, holding the state it is parameterized by.
  *
  * Allocated once per [[ChunkCursorDistributor.run]] and shared by every worker.
- * All five fields are immutable and only read, so the sharing needs no
- * synchronization; the mutable state of a run lives in [[Round]], not here.
+ * Its parameters are immutable and only read, so the sharing needs no
+ * synchronization. The mutable state of a run lives in [[Round]]; the only
+ * mutable state here is the seed handoff, touched once per worker at startup.
  */
 private[stream] final class Dispatcher[R, E <: E1, E1, A](
   n: Int,
@@ -39,21 +42,58 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   // round with no `fetching` flag allocated. Election is therefore the
   // implicit one: every worker's first claim lands at or past the end,
   // exactly one of them sees `i == 0 == length` and performs the initial
-  // fetch, and the rest await the round it publishes.
+  // fetch, and the rest await the round it publishes. Arrival order does not
+  // matter: a worker that starts after the seed was released finds
+  // `chunk == null`, cannot be elected, and follows `seed.next` like the rest.
   //
-  // This is a single-use election point shared by all `n` workers, and it
-  // carries a precondition on how they are started. See
-  // `ChunkCursorDistributor.run`, which is the only thing allowed to start
-  // them: changing that call has broken the whole protocol before.
-  val seed: Round[E, A] = Round.data[E, A](Chunk.empty, n)
+  // Handed out through a reference that the last worker to start clears,
+  // rather than kept in a field, because rounds link forward through `next`:
+  // anything that still reaches the seed reaches every round the run has
+  // produced. A field would be reachable for the whole run, since every
+  // worker's continuations close over this dispatcher.
+  private[this] val seedRef = new AtomicReference[Round[E, A]](Round.data[E, A](Chunk.empty, n))
+  private[this] val started = new AtomicInteger(0)
 
-  // Publishes the round the fetcher just built to the workers awaiting it.
-  // `Promise#done` is the public equivalent of the internal
-  // `promise.unsafe.done`: it performs the identical `completeWith`, wrapped
-  // in a single `ZIO.succeed`. That wrapper costs one effect node per
-  // *chunk*, never per element, so it is off the hot path.
+  // What every worker starts with. The seed is read inside the suspension,
+  // rather than captured by an effect built up front, because this effect
+  // stays reachable for the worker's whole life. `WorkerPool` wraps it in
+  // `ensuring`, a `foldCauseZIO` whose frame sits at the bottom of the
+  // worker's stack until it exits and holds the wrapped effect; with `n == 1`
+  // there is no fork, and the `.unit` map frame holds it on the calling fiber
+  // instead. An effect that captured the seed, as `loop(seed, 0)` does once
+  // called, would pin the whole chain from there.
+  //
+  // Each worker reads before it counts itself, so the `n`-th increment comes
+  // after all `n` reads and no worker can find the reference already cleared.
+  private[this] val start: ZIO[R, Nothing, Unit] = ZIO.suspendSucceed {
+    val seed = seedRef.get
+    if (started.incrementAndGet() == n) seedRef.set(null)
+    loop(seed, 0)
+  }
+
+  /**
+   * Runs the `n` workers, completing once every one of them has observed a
+   * terminal round. Call it at most once: the seed goes to the first `n`
+   * workers to start.
+   */
+  def run: ZIO[R, Nothing, Unit] = WorkerPool.replicate(n)(start)
+
+  /**
+   * The seed round until every worker has started, then `null`. Nothing in a
+   * run reads it; it lets `RetentionSpec` follow the round chain from its root.
+   */
+  private[stream] def seedForTesting: Round[E, A] = seedRef.get
+
+  // Publishes the round the fetcher just built to the workers awaiting it,
+  // then releases the round it succeeds. Publish first: the successor is what
+  // keeps the run moving, and once it is published no worker can claim from
+  // this round again. `map` sequences the release after the publish in a
+  // single effect node, where `*> ZIO.succeed(...)` would cost two; it is
+  // one node per *chunk*, never per element, so it is off the hot path
+  // either way. `Promise#done` is the public equivalent of the internal
+  // `promise.unsafe.done`: it performs the identical `completeWith`.
   private def publish(round: Round[E, A], next: Round[E, A]): ZIO[Any, Nothing, Unit] =
-    round.next.done(Exit.succeed(next)).unit
+    round.next.done(Exit.succeed(next)).map(_ => release(round))
 
   // Releases a round's chunk once it can hand out no more elements. Only the
   // designated fetcher calls this, and only after it has been elected, which
@@ -116,19 +156,15 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
         cause =>
           Cause.flipCauseOption(cause) match {
             case None =>
-              publish(round, Round.terminal[E, A]) *> ZIO.succeed(release(round))
+              publish(round, Round.terminal[E, A])
             case Some(c) =>
               // The fetcher is the sole reporter of a terminal cause:
               // the round it publishes carries only the stop signal.
-              publish(round, Round.terminal[E, A]) *> ZIO.succeed(release(round)) *> onError(c)
+              publish(round, Round.terminal[E, A]) *> onError(c)
           },
         chunk => {
           val nextRound = Round.data[E, A](chunk, n)
-          // Publish first, then drop this round's chunk: the successor
-          // is what keeps the run moving, and after it is published no
-          // worker can claim from this round again. This is what stops
-          // the seed round from transitively pinning the whole stream.
-          publish(round, nextRound) *> ZIO.succeed(release(round)) *> loop(nextRound, 0)
+          publish(round, nextRound) *> loop(nextRound, 0)
         }
       )
     }
@@ -149,11 +185,13 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
     // reported once by the fetcher that pulled it, so workers arriving here
     // must not report it again.
     if (round.terminal) Exit.unit
-    // Trampoline. `foldCauseZIO` on an already-completed `Exit` runs its
-    // continuation *inline* rather than returning to the ZIO interpreter, so
-    // when `f` does not suspend (`Exit.unit`, `ZIO.succeed`, any pure
-    // computation), the whole `loop`/`runClaim` cycle is ordinary JVM
-    // recursion and the stack grows with the round, not with the claim.
+    // Trampoline. `Exit` overrides `foldCauseZIO` to run its continuation
+    // *inline* rather than returning to the ZIO interpreter, so when `f`
+    // returns an `Exit` (`Exit.unit`, `Exit.succeed(a)`), the whole
+    // `loop`/`runClaim` cycle is ordinary JVM recursion and the stack grows
+    // with the round, not with the claim. Any other effect, `ZIO.succeed` and
+    // `ZIO.unit` included, goes back to the interpreter's loop before the
+    // continuation runs, and never builds the chain.
     // `MaxStride` bounds a single claim; it does not bound this.
     // Measured before the fix: a single 200k-element chunk with a no-op `f`
     // overflows a 512KB stack, and the error escapes as a fiber defect.
@@ -198,14 +236,16 @@ private[stream] object Dispatcher {
    * How many consecutive elements a worker may run before returning control to
    * the ZIO interpreter, unwinding the JVM stack.
    *
-   * `foldCauseZIO` on an already-completed `Exit` invokes its continuation
-   * inline, so a synchronous `f` (`Exit.unit`, `ZIO.succeed`, any pure
-   * computation) turns the `loop`/`runClaim` cycle into plain JVM recursion
-   * whose depth is the length of the round. Measured before this existed: a
-   * single 200,000-element chunk with a no-op `f` overflows a 512KB stack, and
-   * the `StackOverflowError` escapes as a fiber defect rather than something a
-   * caller can catch. A suspending `f` never builds the chain, which is why the
-   * existing tests and the I/O-shaped benchmarks never hit it.
+   * `Exit` overrides `foldCauseZIO` to invoke its continuation inline, so an
+   * `f` that returns an `Exit` (`Exit.unit`, `Exit.succeed(a)`) turns the
+   * `loop`/`runClaim` cycle into plain JVM recursion whose depth is the length
+   * of the round. Measured before this existed: a single 200,000-element chunk
+   * with a no-op `f` overflows a 512KB stack, and the `StackOverflowError`
+   * escapes as a fiber defect rather than something a caller can catch. Any
+   * other effect, even a synchronous `ZIO.succeed` or `ZIO.unit`, is a node
+   * the interpreter evaluates in its own loop before invoking the
+   * continuation, so it never builds the chain, which is why the existing
+   * tests and the I/O-shaped benchmarks never hit it.
    *
    * 512 sits ~200x below the measured overflow point on the smallest stack
    * tested, and costs one extra effect node per 512 elements, under 0.2% of

@@ -112,11 +112,10 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         // regardless of n; a double election would pull more.
         //
         // This is also the sharpest guard on how the workers are started. All
-        // `n` of them begin on one shared, single-use seed round, so a start
-        // that lets the first worker run before the others exist makes each
-        // late arrival elect itself. The tell is `n + 1` calls: at n = 2 this
-        // reads 3 instead of 2. See the precondition on
-        // `ChunkCursorDistributor.run` before changing that call.
+        // `n` of them begin on one shared seed round, and `loop` claims from
+        // its cursor when called, so handing every worker one pre-built
+        // `loop(seed, 0)` would make each of them a fetcher and push the count
+        // past 2. See "Starting the workers" on `ChunkCursorDistributor.run`.
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to 100)), Take.end)
         checkAll(Gen.fromIterable(Chunk(2, 16, 128))) { n =>
           for {
@@ -293,8 +292,8 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         }
       } @@ nonFlaky(20),
       test("n = 1 visits every element") {
-        // `runForeachPar` short-circuits n <= 1 to `runForeach`, so this path is
-        // unreachable through the public combinator.
+        // A single worker is not forked: `WorkerPool.replicate` runs it on the
+        // calling fiber, so this is a separate start path from `n >= 2`.
         val chunks = Chunk(Chunk(1, 2, 3), Chunk(4, 5))
         val script = chunks.map(Take.chunk) :+ Take.end
         for {

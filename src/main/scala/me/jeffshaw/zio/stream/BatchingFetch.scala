@@ -173,15 +173,16 @@ private[stream] final class BatchingFetch[E, A] private (
   private def elementsAtLeast(takes: Chunk[Take[E, A]], target: Int): Boolean = {
     var total = 0
     var i = 0
-    while (i < takes.length && total < target) {
-      total += (takes(i).exit match {
-        case Exit.Success(chunk) => chunk.length
+    while (i < takes.length && total < target)
+      takes(i).exit match {
+        case Exit.Success(chunk) =>
+          total += chunk.length
+          i += 1
         // A terminal contributes nothing, and stops the scan: there is no point
         // draining further for elements that cannot be dispatched before it.
-        case _ => return total >= target
-      })
-      i += 1
-    }
+        case _ =>
+          i = takes.length
+      }
     total >= target
   }
 }
@@ -216,12 +217,13 @@ private[stream] object BatchingFetch {
 
   /**
    * Builds the per-run fetcher over `queue`, batching up to `bufferSize` chunks
-   * and draining toward a round of `n * 8` elements.
+   * and draining toward a round of `n * 8` elements. `bufferSize` must be at
+   * least 1; `runForeachPar` clamps it before the queue is built.
    */
   def apply[E, A](queue: Queue[Take[E, A]], bufferSize: Int, n: Int): BatchingFetch[E, A] =
     new BatchingFetch[E, A](
       queue,
-      bufferSize max 1,
+      bufferSize,
       // In `Long` then clamped: `n` is caller-supplied and routinely in the
       // thousands, where `n * 8` in `Int` would overflow to a negative target
       // and make every batch look like it had already met it.

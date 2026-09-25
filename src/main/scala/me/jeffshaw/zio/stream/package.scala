@@ -61,15 +61,23 @@ package object stream {
      *
      * Rather than forking a fiber per element, this combinator forks `n`
      * long-lived worker fibers that pull elements from a shared buffer of up to
-     * `bufferSize` elements. This bounds the concurrency globally, without a
-     * barrier at chunk boundaries, so a slow invocation of `f` never leaves the
-     * other workers idle while elements remain.
+     * `bufferSize` chunks of the stream. This bounds the concurrency globally,
+     * without a barrier at chunk boundaries, so a slow invocation of `f` never
+     * leaves the other workers idle while elements remain.
+     *
+     * `bufferSize` counts chunks, not elements, so the elements buffered are up
+     * to `bufferSize` times the stream's chunk size. It is not a quantity to
+     * compare against `n`: what should exceed `n` is that product, so that the
+     * buffered chunks give every worker several elements.
      *
      * `n == 1` still uses that topology: exactly one invocation of `f` runs at a
      * time, but the stream continues to be consumed into the buffer while `f`
      * runs, so a slow producer and a slow `f` overlap. Only a non-positive `n`
      * degrades to sequential consumption, in which the stream is pulled and `f`
-     * applied on a single fiber and `bufferSize` has no effect.
+     * applied on a single fiber and `bufferSize` has no effect. A non-positive
+     * `bufferSize` is treated as 1 rather than rejected, in the same way that
+     * [[zio.ZIO.foreachParDiscard]] runs sequentially for a non-positive
+     * parallelism rather than failing.
      *
      * If any invocation of `f` fails, the remaining in-flight invocations are
      * interrupted and the returned effect fails. Because interruption is not
@@ -86,7 +94,9 @@ package object stream {
     ): ZIO[R1, E1, Unit] =
       ZIO.suspendSucceed {
         val nn = n
-        val bufferSizeV = bufferSize
+        // Clamped once here, for the queue and the fetcher alike: `Queue.bounded`
+        // dies on a non-positive capacity.
+        val bufferSizeV = bufferSize max 1
         // Only a non-positive `n` falls back to sequential consumption, where
         // "no workers" has no sensible forked meaning. `n == 1` takes the normal
         // forked path: it means "one element at a time", not "no pipelining".

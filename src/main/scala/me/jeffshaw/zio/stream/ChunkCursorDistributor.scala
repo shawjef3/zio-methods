@@ -73,8 +73,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * Any worker reaching one stops, because `loop` checks `round.terminal` before
  * touching the cursor: the worker that published it loops onto it and returns,
  * and every worker awaiting the *previous* round's `next` receives it and hits
- * the same check. A terminal round's own `next` is therefore never awaited and
- * never completed; it exists only to fill the field. This makes every worker
+ * the same check. A terminal round's own `next` and cursor are therefore never
+ * read, and are left null. This makes every worker
  * converge to termination without any worker blocking on a promise that nobody
  * will complete.
  *
@@ -116,35 +116,20 @@ private[stream] object ChunkCursorDistributor {
    * The returned effect completes when every worker has observed a terminal
    * round.
    *
-   * ==Starting the workers: a precondition, not an implementation detail==
+   * ==Starting the workers==
    *
-   * All `n` workers begin on the shared [[Dispatcher.seed]] round, which is a
-   * '''single-use election point''': it is already exhausted, so the one worker
-   * whose claim returns `i == 0` becomes the initial fetcher and every other
-   * worker awaits `seed.next`. That only holds while the seed is alive. Once
-   * the elected fetcher publishes and `release`s it, a worker arriving later
-   * finds a round it can neither claim from nor be elected on, and the run
-   * degenerates: each late arrival starts its own independent fetch/dispatch
-   * sequence instead of joining the shared one.
+   * All `n` workers begin on one shared seed round, and the election on it is
+   * correct whenever each worker arrives (see the seed in [[Dispatcher]]). Two
+   * things about starting them do matter:
    *
-   * How the workers are forked therefore matters. Forking them as '''daemons'''
-   * breaks this: with `forkDaemon`, every worker reaches `fetch` instead of one
-   * (measured at 2 of 2, 8 of 8, 32 of 32 with a terminal-only script), the
-   * fetch count becomes `n + 1`, a failure terminal is reported once per
-   * worker, and `a single chunk keeps all n workers busy` times out. Four
-   * hand-written fork loops were tried and reverted before the cause was
-   * isolated, so the symptom is worth recognizing:
-   *
-   *   - `fetch is invoked exactly once per round` at `n = 2`: 3 calls, not 2.
-   *   - `stops pulling once a terminal round is reached` at `n = 32`: 33, not 2.
-   *   - `a failure terminal is reported exactly once`: reported twice.
-   *
-   * [[WorkerPool]] is what starts them now, forking into the calling fiber's
-   * scope rather than the global one. It was derived by copying ZIO's
-   * `foreachParUnboundedDiscard` verbatim (the implementation
-   * `foreachParDiscard` resolved to here) and removing one piece at a time
-   * with the suite run after each, which is what identified `forkDaemon` as the
-   * part that mattered. See that object for what it drops and why.
+   *   - Each worker must make its own first claim when it runs. `loop` claims
+   *     from the cursor as soon as it is called, so one evaluated
+   *     `loop(seed, 0)` handed to every worker would make each of them the
+   *     seed's fetcher. [[Dispatcher.run]] starts them from a suspended effect,
+   *     which makes that impossible.
+   *   - [[WorkerPool]] forks with `fork`, not `forkDaemon`, so the workers are
+   *     children of the pool fiber and are interrupted with it when the caller
+   *     closes the scope. Daemon workers would outlive a fail-fast teardown.
    */
   def run[R, E <: E1, E1, A](
     n: Int,
@@ -152,15 +137,10 @@ private[stream] object ChunkCursorDistributor {
     f: A => ZIO[R, E1, Any],
     onError: Cause[E1] => ZIO[R, Nothing, Unit]
   )(implicit trace: Trace): ZIO[R, Nothing, Unit] =
-    ZIO.suspendSucceed {
-      // One dispatcher per run, shared by all `n` workers. Its fields are the
-      // state every step of the loop needs and none of it changes during the
-      // run, so holding them here keeps them off the recursive calls: as nested
-      // defs, `n`/`fetch`/`f`/`onError`/`trace` were lifted into every call's
-      // argument list, including the per-element ones.
-      val dispatcher = new Dispatcher[R, E, E1, A](n, fetch, f, onError)
-      // The workers share a single-use election point, which forking them as
-      // daemons breaks. See the precondition on this method.
-      WorkerPool.replicate(n)(dispatcher.loop(dispatcher.seed, 0))
-    }
+    // One dispatcher per run, shared by all `n` workers. Its fields are the
+    // state every step of the loop needs and none of it changes during the
+    // run, so holding them there keeps them off the recursive calls: as nested
+    // defs, `n`/`fetch`/`f`/`onError`/`trace` were lifted into every call's
+    // argument list, including the per-element ones.
+    ZIO.suspendSucceed(new Dispatcher[R, E, E1, A](n, fetch, f, onError).run)
 }

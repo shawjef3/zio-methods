@@ -17,27 +17,120 @@
 package me.jeffshaw.zio.stream
 
 import zio._
-import zio.stream.ZStream
+import zio.stream.{Take, ZStream}
 import zio.test._
 
 import java.lang.ref.WeakReference
+import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
- * Rounds are linked forward through `Round#next`, and the seed round is captured
- * by the worker closures for the whole run. If a drained round keeps its chunk,
- * the seed transitively pins every chunk the run has ever pulled, so retention
- * grows with the length of the stream instead of being bounded by `bufferSize`.
- * That is invisible to correctness tests (every element is still visited
- * exactly once) and shows up only as an OOM on a long stream with large
- * elements.
+ * Rounds are linked forward through `Round#next`, so anything that still holds
+ * an early round, such as a worker blocked in `f`, reaches every later round.
+ * If a drained round kept its chunk, every chunk pulled since then would stay
+ * reachable, so retention would grow with the length of the stream instead of
+ * being bounded by `bufferSize`. And if anything held the seed for the whole
+ * run, the round objects themselves would accumulate, one per round, for as
+ * long as the run lasts. Both are invisible to correctness tests (every element
+ * is still visited exactly once) and show up only as an OOM on a long stream.
  *
- * These tests measure reachability directly with weak references. The run is
- * held open mid-flight by blocking one callback on the last element, so the
- * worker pool is live and the round chain fully built at the moment of
- * measurement. `runForeach` and `mapZIOParUnordered` serve as controls: both
- * retain only the element they are blocked on.
+ * These tests measure reachability directly with weak references. The payload
+ * tests hold the run open mid-flight by blocking one callback on the last
+ * element, so the worker pool is live and the round chain fully built at the
+ * moment of measurement. `runForeach` and `mapZIOParUnordered` serve as
+ * controls: both retain only the element they are blocked on. The round test
+ * measures from inside the final fetch, for the same reason.
  */
 object RetentionSpec extends ZIOSpecDefault {
+
+  /**
+   * Follows the round chain from the seed as a run advances. It holds a strong
+   * reference only to the newest round it has reached, which pins nothing
+   * earlier because the links point forward, and a weak one to every
+   * `SampleEvery`-th round it passes. A sampled round that is still reachable
+   * once it is behind the newest is therefore being held by the run.
+   *
+   * Only the fetcher touches it, and successive fetchers are ordered by the
+   * round handoff; `@volatile` makes that independent of those details.
+   */
+  private final class RoundChaser {
+    @volatile var newest: Round[Nothing, Int] = _
+    @volatile var passed = 0
+    @volatile var fetches = 0
+    @volatile var sampled = 0
+    @volatile var alive = -1
+    private[this] val samples = new ConcurrentLinkedQueue[WeakReference[AnyRef]]
+
+    // The effect-level `poll`, because `Promise#unsafe` is `private[zio]`.
+    val advance: UIO[Unit] =
+      ZIO.suspendSucceed(newest.next.poll).flatMap {
+        case Some(done) =>
+          done match {
+            case s: Exit.Success[_] =>
+              ZIO.succeed {
+                newest = s.value.asInstanceOf[Round[Nothing, Int]]
+                passed += 1
+                if (passed % SampleEvery == 0) samples.add(new WeakReference[AnyRef](newest))
+              } *> advance
+            case _ => ZIO.unit
+          }
+        case None => ZIO.unit
+      }
+
+    /**
+     * Counts the sampled rounds still reachable. A leak keeps all of them, and a
+     * GC that happens not to run looks the same, so this retries a few times
+     * before believing a high count.
+     */
+    def measure(): Unit = {
+      var attempts = 0
+      var live = Int.MaxValue
+      while (live > RoundSlack && attempts < 5) {
+        java.lang.System.gc()
+        Thread.sleep(50)
+        var count = 0
+        samples.forEach(r => if (r.get() ne null) count += 1)
+        live = count
+        attempts += 1
+      }
+      sampled = samples.size
+      alive = live
+    }
+  }
+
+  private val RoundCount = 200000
+  private val SampleEvery = 1000
+  // The newest sample is the round being fetched from and is live by
+  // definition; a worker still parked a round or two behind can hold one more.
+  private val RoundSlack = 3
+
+  /**
+   * Runs a [[Dispatcher]] over `RoundCount` one-element rounds and, from inside
+   * the final fetch, reports how many sampled rounds are still reachable.
+   *
+   * The dispatcher is built here rather than through `ChunkCursorDistributor`
+   * only so the seed can be read before the workers start; `run` is the same
+   * one production uses. The seed goes straight into the chaser, never into a
+   * local that a closure could capture and keep alive. `pinSeed` holds it for
+   * the whole run instead, which is the leak, as a control on the measurement.
+   */
+  private def roundsReachableDuringRun(n: Int, pinSeed: Boolean = false): UIO[(Int, Int)] =
+    ZIO.suspendSucceed {
+      val chaser = new RoundChaser
+      val pin = new java.util.concurrent.atomic.AtomicReference[AnyRef]
+      val fetch: UIO[Take[Nothing, Int]] =
+        chaser.advance *> ZIO.succeed {
+          chaser.fetches += 1
+          if (chaser.fetches <= RoundCount) Take.single(chaser.fetches)
+          else {
+            chaser.measure()
+            Take.end
+          }
+        }
+      val dispatcher = new Dispatcher[Any, Nothing, Nothing, Int](n, fetch, _ => ZIO.unit, _ => ZIO.unit)
+      chaser.newest = dispatcher.seedForTesting
+      if (pinSeed) pin.set(chaser.newest)
+      dispatcher.run.as((chaser.sampled, chaser.alive)) <* ZIO.succeed(pin.set(null))
+    }
 
   private final class Payload(val id: Int) {
     // Large enough that retaining the whole stream is an OOM rather than a
@@ -117,6 +210,29 @@ object RetentionSpec extends ZIOSpecDefault {
           )
           // Not worse than the baselines by more than a chunk.
         } yield assertTrue(ours._2 <= seq._2 + chunkSz, ours._2 <= par._2 + chunkSz)
-      } @@ TestAspect.withLiveClock @@ TestAspect.timeout(60.seconds)
+      } @@ TestAspect.withLiveClock @@ TestAspect.timeout(60.seconds),
+      test("a long run does not retain the rounds it has finished with") {
+        // One-element rounds, so there is one round per element. If anything
+        // holds the seed for the life of the run, every sampled round is still
+        // reachable at the end rather than only the newest few. `n == 1` is
+        // included because a single worker is not forked, so its start effect
+        // is held by a different frame than the workers' at `n >= 2`.
+        checkAll(Gen.fromIterable(Chunk(1, 2))) { n =>
+          for {
+            res <- roundsReachableDuringRun(n)
+            (sampled, alive) = res
+          } yield assertTrue(sampled == RoundCount / SampleEvery, alive <= RoundSlack)
+        }
+      } @@ TestAspect.timeout(120.seconds),
+      test("the round measurement sees a pinned seed") {
+        // The control for the test above: with the seed held for the whole run,
+        // which is the leak, every sampled round must still be reachable. This
+        // is what shows a low count there is a real result and not a chaser
+        // that has lost the chain.
+        for {
+          res <- roundsReachableDuringRun(1, pinSeed = true)
+          (sampled, alive) = res
+        } yield assertTrue(sampled == RoundCount / SampleEvery, alive == sampled)
+      } @@ TestAspect.timeout(120.seconds)
     )
 }
