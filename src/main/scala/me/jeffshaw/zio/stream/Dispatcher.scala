@@ -75,8 +75,22 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
    * Runs the `n` workers, completing once every one of them has observed a
    * terminal round. Call it at most once: the seed goes to the first `n`
    * workers to start.
+   *
+   * A worker can die even though its type says it cannot fail: `loop` calls `f`
+   * directly, so an `f` that throws while building its effect throws inside a
+   * continuation, and the runtime turns that into a defect that unwinds past the
+   * element's `foldCauseZIO`, which was never built. `WorkerPool` only counts
+   * exits, so without the handler here that death would be lost: the run would
+   * carry on a worker short, and once every worker had died it would stop
+   * consuming the stream and still report success. At `n == 1`, which does not
+   * fork, the same defect would fail the run instead. Handling it once per
+   * worker sends it through `onError` like any other failure of `f`, at no
+   * per-element cost, and the fold frame it adds holds only `start`, which
+   * does not reach the seed. External interruption never reaches the handler,
+   * since the runtime skips fold handlers on an interrupted fiber, and
+   * `onError` ignores interruption-only causes regardless.
    */
-  def run: ZIO[R, Nothing, Unit] = WorkerPool.replicate(n)(start)
+  def run: ZIO[R, Nothing, Unit] = WorkerPool.replicate(n)(start.catchAllCause(onError))
 
   /**
    * The seed round until every worker has started, then `null`. Nothing in a

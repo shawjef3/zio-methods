@@ -356,6 +356,20 @@ object RunForeachParSpec extends ZIOSpecDefault {
         val effect = ZStream.range(0, 100).runForeachPar(8)(_ => ZIO.die(boom))
         assertZIO(effect.exit)(dies(equalTo(boom)))
       } @@ nonFlaky(20),
+      test("a callback that throws before returning its effect fails the run, whatever n is") {
+        // The dispatch loop calls `f` directly, so a throw here is the worker's
+        // own death rather than a failure of `f`'s effect. It used to be lost
+        // for any `n` above 1: the run succeeded a worker short, or, when every
+        // element threw, abandoned the stream and still succeeded.
+        val boom = new RuntimeException("thrown building the effect")
+        checkAll(Gen.fromIterable(Chunk(1, 2, 8)) <*> Gen.fromIterable(Chunk(false, true))) { case (n, everyElement) =>
+          val f: Int => UIO[Unit] = a => {
+            if (everyElement || a == 50) throw boom
+            ZIO.unit
+          }
+          assertZIO(ZStream.range(0, 1000, 8).runForeachPar(n)(f).exit)(dies(equalTo(boom)))
+        }
+      } @@ nonFlaky(20),
       test("a defect in the stream is not swallowed") {
         val boom = new RuntimeException("die")
         val effect = (ZStream.range(0, 100) ++ ZStream.die(boom)).runForeachPar(8)(_ => ZIO.unit)
