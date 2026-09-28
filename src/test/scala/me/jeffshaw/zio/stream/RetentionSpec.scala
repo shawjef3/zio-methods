@@ -112,21 +112,27 @@ object RetentionSpec extends ZIOSpecDefault {
    * one production uses. The seed goes straight into the chaser, never into a
    * local that a closure could capture and keep alive. `pinSeed` holds it for
    * the whole run instead, which is the leak, as a control on the measurement.
+   * `blockFirst` holds the first element's `f` open until after the
+   * measurement, so one worker stays inside `f` while the others advance
+   * through every remaining round.
    */
-  private def roundsReachableDuringRun(n: Int, pinSeed: Boolean = false): UIO[(Int, Int)] =
+  private def roundsReachableDuringRun(n: Int, pinSeed: Boolean = false, blockFirst: Boolean = false): UIO[(Int, Int)] =
     ZIO.suspendSucceed {
       val chaser = new RoundChaser
       val pin = new java.util.concurrent.atomic.AtomicReference[AnyRef]
+      // Opened from the final fetch, once the measurement has been taken.
+      val gate = Promise.unsafe.make[Nothing, Unit](FiberId.None)(Unsafe)
       val fetch: UIO[Take[Nothing, Int]] =
-        chaser.advance *> ZIO.succeed {
+        chaser.advance *> ZIO.suspendSucceed {
           chaser.fetches += 1
-          if (chaser.fetches <= RoundCount) Take.single(chaser.fetches)
+          if (chaser.fetches <= RoundCount) Exit.succeed(Take.single(chaser.fetches))
           else {
             chaser.measure()
-            Take.end
+            gate.succeed(()).as(Take.end)
           }
         }
-      val dispatcher = new Dispatcher[Any, Nothing, Nothing, Int](n, fetch, _ => ZIO.unit, _ => ZIO.unit)
+      val f: Int => UIO[Any] = a => if (blockFirst && a == 1) gate.await else ZIO.unit
+      val dispatcher = new Dispatcher[Any, Nothing, Nothing, Int](n, fetch, f, _ => ZIO.unit)
       chaser.newest = dispatcher.seedForTesting
       if (pinSeed) pin.set(chaser.newest)
       dispatcher.run.as((chaser.sampled, chaser.alive)) <* ZIO.succeed(pin.set(null))
@@ -220,6 +226,19 @@ object RetentionSpec extends ZIOSpecDefault {
         checkAll(Gen.fromIterable(Chunk(1, 2))) { n =>
           for {
             res <- roundsReachableDuringRun(n)
+            (sampled, alive) = res
+          } yield assertTrue(sampled == RoundCount / SampleEvery, alive <= RoundSlack)
+        }
+      } @@ TestAspect.timeout(120.seconds),
+      test("a slow callback does not retain the rounds published while it runs") {
+        // One worker stays inside `f` on the first element for the whole run
+        // while the others advance through every round. Its continuation used
+        // to hold the round it claimed from, and through `next` every round
+        // after it, so a single hung `f` retained all of them until it
+        // returned.
+        checkAll(Gen.fromIterable(Chunk(2, 4))) { n =>
+          for {
+            res <- roundsReachableDuringRun(n, blockFirst = true)
             (sampled, alive) = res
           } yield assertTrue(sampled == RoundCount / SampleEvery, alive <= RoundSlack)
         }

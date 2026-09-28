@@ -54,6 +54,22 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   private[this] val seedRef = new AtomicReference[Round[E, A]](Round.data[E, A](Chunk.empty, n))
   private[this] val started = new AtomicInteger(0)
 
+  // The newest round published so far. A worker that finishes `f` resumes
+  // here rather than on the round it claimed from, because the continuation
+  // of an `f` still running is reachable for as long as it runs: if it held
+  // that round, then through `next` it would hold every round published since,
+  // so one slow or hung `f` would retain the stream's rounds until it
+  // returned. Holding the newest round pins nothing earlier, since the links
+  // point forward.
+  //
+  // Jumping ahead skips nothing. A round is superseded only once its fetcher
+  // found the cursor at or past the end, so every element of every older round
+  // has already been claimed. Election does not depend on which round a worker
+  // arrives at, as the seed shows. `publish` writes it before completing the
+  // promise that hands the round out, so a worker that has claimed from a
+  // round reads that round or a newer one, never null.
+  @volatile private[this] var current: Round[E, A] = null
+
   // What every worker starts with. The seed is read inside the suspension,
   // rather than captured by an effect built up front, because this effect
   // stays reachable for the worker's whole life. `WorkerPool` wraps it in
@@ -106,8 +122,14 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   // one node per *chunk*, never per element, so it is off the hot path
   // either way. `Promise#done` is the public equivalent of the internal
   // `promise.unsafe.done`: it performs the identical `completeWith`.
-  private def publish(round: Round[E, A], next: Round[E, A]): ZIO[Any, Nothing, Unit] =
+  //
+  // It also makes `next` the round finished callbacks resume from. That write
+  // happens when `publish` is called, which is before the returned effect
+  // completes the promise.
+  private def publish(round: Round[E, A], next: Round[E, A]): ZIO[Any, Nothing, Unit] = {
+    current = next
     round.next.done(Exit.succeed(next)).map(_ => release(round))
+  }
 
   // Releases a round's chunk once it can hand out no more elements. Only the
   // designated fetcher calls this, and only after it has been elected, which
@@ -132,16 +154,16 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   // `chunk` is passed in rather than re-read from the round: the fetcher may
   // null the field at any time after the boundary, and this range was
   // reserved before that could happen.
-  private def runClaim(round: Round[E, A], chunk: Chunk[A], i: Int, until: Int, depth: Int): ZIO[R, Nothing, Unit] =
+  private def runClaim(chunk: Chunk[A], i: Int, until: Int, depth: Int): ZIO[R, Nothing, Unit] =
     f(chunk(i)).foldCauseZIO(
       onError,
-      // Continue within the claim, or go back to the cursor once it is
-      // exhausted. A failure ends this worker's loop exactly as in the
-      // unbatched path: the rest of the claim is abandoned, which is what
-      // fail-fast means here.
+      // Continue within the claim, or once it is exhausted go back to the
+      // cursor of the newest round, not this one: see `current`. A failure
+      // ends this worker's loop exactly as in the unbatched path: the rest of
+      // the claim is abandoned, which is what fail-fast means here.
       _ =>
-        if (i + 1 < until) runClaim(round, chunk, i + 1, until, depth + 1)
-        else loop(round, depth + 1)
+        if (i + 1 < until) runClaim(chunk, i + 1, until, depth + 1)
+        else loop(current, depth + 1)
     )
 
   // Whether this worker is the round's designated fetcher.
@@ -237,8 +259,10 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
         // covers a single element, so it goes straight to `f` and skips
         // `runClaim`'s range bookkeeping entirely, so that path is then exactly
         // the pre-batching loop, and stays inline here so it gains no frame.
-        if (stride == 1) f(chunk(i)).foldCauseZIO(onError, _ => loop(round, depth + 1))
-        else runClaim(round, chunk, i, (i + stride) min length, depth)
+        // Either way the continuation resumes from `current` rather than
+        // capturing `round`, so an `f` that runs long pins no rounds.
+        if (stride == 1) f(chunk(i)).foldCauseZIO(onError, _ => loop(current, depth + 1))
+        else runClaim(chunk, i, (i + stride) min length, depth)
       else if (isFetcher(round, chunk, i, length, stride)) fetchAndPublish(round)
       else awaitNext(round)
     }
