@@ -256,3 +256,12 @@ sbt "benchmarks/Jmh/run -f 2 CrossoverBenchmark"
 `Test/testOnly *` rather than `test`: under sbt 2.x, `test` runs `testQuick`, which skips specs it believes are unaffected. On an unchanged tree it reports `No tests to run for Test / testQuick`, and after a partial change it reports a reduced count, both of which read as success. This is sbt's own default rather than anything this build configures, so it applies to any sbt 2 project.
 
 Benchmarks want a quiet machine, and a laptop is not one: clock boost depends on die temperature and recent history, so two identical runs minutes apart execute at different speeds. Run each parameter point as its own JVM invocation, since a single sweep lets JIT state from earlier points distort later ones.
+
+When comparing two revisions, run each comparison twice, once under each of these JVM flags:
+
+```
+sbt "benchmarks/Jmh/run -f 5 -wi 5 -i 5 -jvmArgsAppend -XX:TypeProfileWidth=8 FetchPathBenchmark"
+sbt "benchmarks/Jmh/run -f 5 -wi 5 -i 5 -jvmArgsAppend -XX:-UseTypeProfile FetchPathBenchmark"
+```
+
+Without them, forks of the same build settle into one of two JIT modes about 10% apart, depending on whether C2's receiver-type profile lets it inline the lambdas at the dispatch loop's call sites. A split that size widens the error bars enough to hide a real difference or fake one, especially for a change that alters closure shapes. `-XX:TypeProfileWidth=8` puts every fork in the fast mode, though a benchmark whose setup exercises many code paths first can still land in the slow one. `-XX:-UseTypeProfile` disables profile-driven devirtualization, so every fork lands in the slow mode: absolute scores run below what production sees, but the difference between two revisions stays comparable. Trust a difference only when it has the same sign under both.
