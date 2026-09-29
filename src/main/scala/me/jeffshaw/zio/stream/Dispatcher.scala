@@ -114,13 +114,8 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
    */
   private[stream] def seedForTesting: Round[E, A] = seedRef.get
 
-  // Publishes the round the fetcher just built to the workers awaiting it,
-  // then releases the round it succeeds. Publish first: the successor is what
-  // keeps the run moving, and once it is published no worker can claim from
-  // this round again. `map` sequences the release after the publish in a
-  // single effect node, where `*> ZIO.succeed(...)` would cost two; it is
-  // one node per *chunk*, never per element, so it is off the hot path
-  // either way. `Promise#done` is the public equivalent of the internal
+  // Publishes the round the fetcher just built to the workers awaiting it.
+  // `Promise#done` is the public equivalent of the internal
   // `promise.unsafe.done`: it performs the identical `completeWith`.
   //
   // It also makes `next` the round finished callbacks resume from. That write
@@ -128,7 +123,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   // completes the promise.
   private def publish(round: Round[E, A], next: Round[E, A]): ZIO[Any, Nothing, Unit] = {
     current = next
-    round.next.done(Exit.succeed(next)).map(_ => release(round))
+    round.next.done(Exit.succeed(next)).unit
   }
 
   // Releases a round's chunk once it can hand out no more elements. Only the
@@ -136,10 +131,20 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   // happens only once the cursor is at or past the end, so every element has
   // already been claimed.
   //
+  // It runs before the fetch rather than after the publish. The fetch can
+  // wait on the producer for as long as the stream is idle, and for all that
+  // time the drained round is reachable twice over: from the fetcher's own
+  // continuation, and from `current`, which still names it. Released only
+  // after the publish, its chunk, a fusion of up to `bufferSize` of the
+  // stream's chunks, stayed alive until the next chunk arrived. Measured with
+  // 16 chunks of 100 emitted before an idle stream: 400 to 1600 elements
+  // reachable, against the 100 of the chunk the stream machinery itself keeps.
+  //
   // Workers still working through a claim do not touch `chunk` again: `loop`
-  // reads it into a local and hands that local to `runClaim`, which carries it
-  // for the whole range. Nulling the field therefore cannot affect a claim
-  // already in flight, however many elements are left in it. The field is
+  // reads it into a local and hands that local, or a copy of what is left of
+  // the claim, to `runClaim`, which carries it for the whole range. Nulling
+  // the field therefore cannot affect a claim already in flight, however many
+  // elements are left in it. The field is
   // `@volatile`, so a worker that re-enters `loop` on this round either sees
   // the chunk (and its cursor is past the end, sending it to the await
   // branch) or sees null and is likewise past the end.
@@ -182,10 +187,32 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
 
   // Sequences what comes after an `f` that did not complete synchronously:
   // the rest of its claim, or, at the end of the claim, back to the cursor of
-  // the newest round. Only the first case needs a closure of its own.
+  // the newest round.
+  //
+  // What the continuation captures matters, because the continuation of an
+  // `f` that has not returned is reachable for as long as it runs. Capturing
+  // `chunk` there would keep the whole round's chunk, a fusion of up to
+  // `bufferSize` of the stream's chunks, alive behind every hung or slow
+  // callback, long after `release` let the round go: measured with 64
+  // workers, one hung callback kept 1697 elements reachable against 99 for
+  // `mapZIOParUnordered`. So the continuation captures only what the claim
+  // still needs:
+  //
+  //   - At the end of the claim, nothing: the pre-built `resume`.
+  //   - Mid-claim, a copy of the rest of the claim, at most
+  //     `Round.MaxStride - 1` elements. A chunk that small is kept as is, so
+  //     a claim copies at most once however often its `f` suspends.
+  //
+  // An `f` that completed synchronously never reaches here: `loop` and
+  // `runClaim` handle those results inline, so nothing captures `chunk`
+  // beyond the current JVM frame.
   private def continueAfter(effect: ZIO[R, E1, Any], chunk: Chunk[A], next: Int, until: Int): ZIO[R, Nothing, Unit] =
-    if (next < until) effect.foldCauseZIO(onError, _ => runClaim(chunk, next, until))
-    else effect.foldCauseZIO(onError, resume)
+    if (next >= until) effect.foldCauseZIO(onError, resume)
+    else if (chunk.length <= Round.MaxStride) effect.foldCauseZIO(onError, _ => runClaim(chunk, next, until))
+    else {
+      val rest = chunk.slice(next, until).materialize
+      effect.foldCauseZIO(onError, _ => runClaim(rest, 0, rest.length))
+    }
 
   // Whether this worker is the round's designated fetcher.
   //
@@ -197,17 +224,19 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   //
   // `chunk ne null` keeps a released round from re-electing: a worker that
   // re-enters `loop` on one goes to the await branch instead. For a batched
-  // round the CAS would also refuse it, since `release` runs only after the
-  // winner has published, so `fetching` is already true by the time the chunk
-  // is nulled. That makes the guard belt and braces there, and the sole
+  // round the CAS would also refuse it, since `release` runs only once the
+  // winner has been elected, so `fetching` is already true by the time the
+  // chunk is nulled. That makes the guard belt and braces there, and the sole
   // protection on the stride-1 path, where there is no flag to fall back on.
   private def isFetcher(round: Round[E, A], chunk: Chunk[A], i: Int, length: Int, stride: Int): Boolean =
     (chunk ne null) && (if (stride == 1) i == length else round.fetching.compareAndSet(false, true))
 
-  // Pulls the next `Take` and publishes the round it yields. A terminal
-  // `Take` becomes a terminal round and ends this worker; a data `Take`
-  // becomes the next round, which this worker then loops onto.
-  private def fetchAndPublish(round: Round[E, A]): ZIO[R, Nothing, Unit] =
+  // Releases the drained round, then pulls the next `Take` and publishes the
+  // round it yields. A terminal `Take` becomes a terminal round and ends this
+  // worker; a data `Take` becomes the next round, which this worker then
+  // loops onto.
+  private def fetchAndPublish(round: Round[E, A]): ZIO[R, Nothing, Unit] = {
+    release(round)
     fetch.flatMap { take =>
       take.exit.foldExit(
         cause =>
@@ -225,6 +254,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
         }
       )
     }
+  }
 
   // Someone else is fetching; wait for the published round.
   private def awaitNext(round: Round[E, A]): ZIO[R, Nothing, Unit] =

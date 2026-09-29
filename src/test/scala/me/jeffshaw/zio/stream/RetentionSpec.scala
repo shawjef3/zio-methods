@@ -185,6 +185,82 @@ object RetentionSpec extends ZIOSpecDefault {
       _ <- release.succeed(()) *> fiber.interrupt
     } yield (rs.size, alive)
 
+  /**
+   * Counts the payloads still reachable, apart from those in `held`, retrying
+   * the GC a few times because a single one can be skipped.
+   */
+  private def countReachable(refs: ConcurrentLinkedQueue[WeakReference[Payload]], held: Set[Int]): Int = {
+    var live = 0
+    var attempts = 0
+    while (attempts < 4) {
+      java.lang.System.gc()
+      Thread.sleep(80)
+      live = 0
+      refs.forEach { r =>
+        val p = r.get()
+        if ((p ne null) && !held(p.id)) live += 1
+      }
+      attempts += 1
+    }
+    live
+  }
+
+  /**
+   * Runs `consume` over the source with one callback hung on an element in the
+   * middle of the stream for the whole run, and another blocked on the last
+   * element so the run stays open. Reports how many payloads other than those
+   * two are reachable once everything else has been processed.
+   *
+   * With `n = 64` the source fuses into rounds large enough to batch claims,
+   * so the hung element sits inside a multi-element claim, and the rest of that
+   * claim is what the hung callback's continuation has to keep.
+   */
+  private def reachableWithHungCallback(consume: (Payload => UIO[Any]) => ZIO[Any, Any, Any]): UIO[Int] = {
+    val hangAt = total / 2
+    for {
+      refs <- ZIO.succeed(new ConcurrentLinkedQueue[WeakReference[Payload]])
+      hung <- Promise.make[Nothing, Unit]
+      last <- Promise.make[Nothing, Unit]
+      release <- Promise.make[Nothing, Unit]
+      f = (p: Payload) => {
+        refs.add(new WeakReference(p))
+        if (p.id == hangAt) hung.succeed(()) *> release.await
+        else if (p.id == blockAt) last.succeed(()) *> release.await
+        else ZIO.unit
+      }
+      fiber <- consume(f).fork
+      _ <- hung.await *> last.await
+      _ <- ZIO.sleep(300.millis)
+      alive <- ZIO.succeed(countReachable(refs, Set(hangAt, blockAt)))
+      _ <- release.succeed(()) *> fiber.interrupt
+    } yield alive
+  }
+
+  /**
+   * Runs `consume` over a stream that emits `idleAfter` chunks as fast as it
+   * can and then emits nothing more, and reports how many payloads are
+   * reachable once every element emitted has been processed.
+   */
+  private val idleAfter = 16
+  private def reachableWhileIdle(consume: (ZStream[Any, Nothing, Payload], Payload => UIO[Any]) => ZIO[Any, Any, Any]) =
+    for {
+      refs <- ZIO.succeed(new ConcurrentLinkedQueue[WeakReference[Payload]])
+      processed <- Ref.make(0)
+      all <- Promise.make[Nothing, Unit]
+      stream = ZStream.unfoldChunk(0) { k =>
+        if (k >= idleAfter) None
+        else Some((Chunk.fromIterable((k * chunkSz until (k + 1) * chunkSz).map(new Payload(_))), k + 1))
+      } ++ ZStream.never
+      f = (p: Payload) =>
+        ZIO.succeed(refs.add(new WeakReference(p))) *>
+          processed.updateAndGet(_ + 1).flatMap(c => all.succeed(()).when(c == idleAfter * chunkSz))
+      fiber <- consume(stream, f).fork
+      _ <- all.await
+      _ <- ZIO.sleep(300.millis)
+      alive <- ZIO.succeed(countReachable(refs, Set.empty))
+      _ <- fiber.interrupt
+    } yield alive
+
   def spec =
     suite("retention")(
       test("a drained chunk is not retained for the life of the run") {
@@ -252,6 +328,41 @@ object RetentionSpec extends ZIOSpecDefault {
           res <- roundsReachableDuringRun(1, pinSeed = true)
           (sampled, alive) = res
         } yield assertTrue(sampled == RoundCount / SampleEvery, alive == sampled)
-      } @@ TestAspect.timeout(120.seconds)
+      } @@ TestAspect.timeout(120.seconds),
+      test("a callback hung inside a batched claim retains only its claim") {
+        // The continuation of an `f` that has not returned is reachable for as
+        // long as it runs. Mid-claim it used to hold the whole fused round it
+        // claimed from, up to `bufferSize` chunks, so each hung callback kept a
+        // round alive: measured 1697 payloads here, against 99 for
+        // `mapZIOParUnordered`. `n = 512` never batches a round this size, so
+        // it holds nothing either way and serves as the in-suite comparison.
+        for {
+          par <- reachableWithHungCallback(f => source.mapZIOParUnordered(64)(f).runDrain)
+          unbatched <- reachableWithHungCallback(f => source.runForeachPar(512, 16)(f))
+          batched <- reachableWithHungCallback(f => source.runForeachPar(64, 16)(f))
+          few <- reachableWithHungCallback(f => source.runForeachPar(8, 16)(f))
+          _ <- ZIO.succeed(
+            println(
+              s"[retention] hung callback: mapZIOParUnordered=$par runForeachPar(512)=$unbatched runForeachPar(64)=$batched runForeachPar(8)=$few"
+            )
+          )
+          // One chunk of slack for the round being dispatched when measured,
+          // and one for the chunk the stream machinery holds.
+        } yield assertTrue(batched <= par + 2 * chunkSz, few <= par + 2 * chunkSz, unbatched <= par + 2 * chunkSz)
+      } @@ TestAspect.withLiveClock @@ TestAspect.timeout(120.seconds),
+      test("an idle stream does not keep the drained round") {
+        // Once every buffered element has been dispatched, the fetcher waits
+        // on the producer. The round it drained used to keep its fused chunk
+        // until the next one arrived, because it was released only after
+        // publishing: measured 400 to 1600 payloads, against the single
+        // 100-element chunk `runForeach` keeps, which is the stream
+        // machinery's own and is not ours to release.
+        for {
+          seq <- reachableWhileIdle((s, f) => s.runForeach(f))
+          four <- reachableWhileIdle((s, f) => s.runForeachPar(4, 16)(f))
+          many <- reachableWhileIdle((s, f) => s.runForeachPar(64, 16)(f))
+          _ <- ZIO.succeed(println(s"[retention] idle: runForeach=$seq runForeachPar(4)=$four runForeachPar(64)=$many"))
+        } yield assertTrue(four <= seq + chunkSz / 2, many <= seq + chunkSz / 2)
+      } @@ TestAspect.withLiveClock @@ TestAspect.timeout(120.seconds)
     )
 }

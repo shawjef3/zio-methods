@@ -119,7 +119,7 @@ private[stream] object Round {
    * pathological elements is still survivable. Raising it further needs the skew
    * benchmark, not just the uniform one.
    */
-  private final val MaxStride = 64
+  private[stream] final val MaxStride = 64
 
   /**
    * How many claims each worker should get per round, at minimum. This is what
