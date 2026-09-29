@@ -50,15 +50,11 @@ private[stream] final class Round[E, A](
   /**
    * Elects the round's single designated fetcher when `stride > 1`: the first
    * worker to find the cursor at or past the end wins it by CAS.
+   * [[ChunkCursorDistributor]] explains why only batched rounds need it.
    *
-   * `null` for a stride-1 round, where it is neither allocated nor read. There
-   * the bases are consecutive, so exactly one worker lands on `i == length` and
-   * that implicit test elects it for free. Batched claims skip bases (a
-   * stride-8 claim on a 10-element round leaves the cursor at 16), so no base
-   * need ever equal `length`, and the implicit test would elect nobody and
-   * deadlock the run; only there is the extra atomic worth paying, and only
-   * there is the round large enough for it to disappear into the per-round
-   * cost.
+   * `null` for a stride-1 round, where `i == length` elects for free, so the
+   * flag is neither allocated nor read. That keeps a slow-`f` run, where every
+   * round is stride 1, allocating exactly what it did before batching existed.
    */
   val fetching: AtomicBoolean
 )
@@ -167,22 +163,16 @@ private[stream] object Round {
       makePromise[E, A],
       terminal = false,
       stride,
-      // Only a batched round elects by CAS; at stride 1 the implicit
-      // `i == length` test does it, so the flag is never read and is left
-      // unallocated. That keeps a slow-`f` run, where every round is stride 1,
-      // allocating exactly what it did before batching existed.
       if (stride == 1) null else new AtomicBoolean(false)
     )
   }
 
+  /**
+   * A stop signal. `loop` checks `terminal` before touching anything else, so
+   * the cursor and promise are never read and are left null: a change that did
+   * read them would fail loudly rather than wait on a promise nobody completes.
+   */
   def terminal[E, A]: Round[E, A] =
-    // A terminal round's `next` is never awaited: `loop` checks `terminal`
-    // before touching the cursor, so a worker that loops onto a terminal round
-    // stops immediately, and a worker awaiting the *previous* round's `next`
-    // receives this round and then hits that same check. Its cursor and
-    // promise are therefore never read, so they are left null: a change that
-    // did read them would fail loudly rather than wait on a promise nobody
-    // completes.
     new Round[E, A](
       Chunk.empty,
       null,

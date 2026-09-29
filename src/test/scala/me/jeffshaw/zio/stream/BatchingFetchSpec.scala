@@ -62,8 +62,6 @@ object BatchingFetchSpec extends ZIOSpecDefault {
         test("a single take is returned as-is, without copying") {
           val only = data(1, 2, 3)
           val fused = BatchingFetch.fuse(Chunk(only))
-          // Identity, not just equality: the n <= chunkSize regime must make no
-          // copy at all.
           assertTrue(elements(fused).get eq elements(only).get)
         },
         test("several takes fuse into one, in order") {
@@ -116,8 +114,6 @@ object BatchingFetchSpec extends ZIOSpecDefault {
           } yield assertTrue(elements(out).contains(Chunk(1, 2, 3, 4, 5, 6, 7, 8)))
         },
         test("a batch already at target is not drained further") {
-          // The first chunk alone meets the target, so the queue must be left
-          // alone: the second chunk stays for the next fetch.
           for {
             q <- Queue.bounded[Take[String, Int]](16)
             _ <- q.offer(data(1, 2, 3, 4, 5, 6, 7, 8))
@@ -129,8 +125,6 @@ object BatchingFetchSpec extends ZIOSpecDefault {
             assertTrue(elements(second).contains(Chunk(9)))
         },
         test("draining an empty queue adds nothing and does not block") {
-          // One element-poor chunk and nothing behind it. `takeAll` returns
-          // empty, so the round is what the first take held.
           for {
             q <- Queue.bounded[Take[String, Int]](16)
             _ <- q.offer(data(1))
@@ -140,9 +134,6 @@ object BatchingFetchSpec extends ZIOSpecDefault {
             assertTrue(out.toOption.flatMap(elements).contains(Chunk(1)))
         },
         test("a terminal picked up by the drain is still parked, not lost") {
-          // The drain pulls the terminal in alongside data. It must be split off
-          // and delivered after the data round, exactly as when `takeBetween`
-          // returns it directly.
           for {
             q <- Queue.bounded[Take[String, Int]](16)
             _ <- q.offer(data(1))
@@ -168,7 +159,6 @@ object BatchingFetchSpec extends ZIOSpecDefault {
           for {
             b <- fetcher(data(1), Take.fail("boom"))
             first <- b.effect
-            // The terminal was parked mid-batch; the failure must still arrive.
             second <- b.effect
             cause = second.exit match {
               case Exit.Failure(c) => Cause.flipCauseOption(c)

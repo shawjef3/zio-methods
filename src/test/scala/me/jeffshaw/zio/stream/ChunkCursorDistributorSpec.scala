@@ -94,9 +94,7 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         }
       } @@ nonFlaky(20),
       test("every worker converges after data rounds") {
-        // n far exceeds the elements available, so most workers spend the run
-        // awaiting rounds rather than claiming elements. All of them must still
-        // observe the terminal and stop.
+        // n far exceeds the elements available, so most workers only await rounds.
         val chunks = Chunk(Chunk(1, 2, 3), Chunk(4, 5), Chunk(6))
         val script = chunks.map(Take.chunk) :+ Take.end
         for {
@@ -107,15 +105,10 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         } yield assertTrue(res.sorted == Vector(1, 2, 3, 4, 5, 6))
       } @@ nonFlaky(50),
       test("fetch is invoked exactly once per round") {
-        // "Exactly one worker observes the boundary value, by construction."
         // With one chunk plus a terminal, a correct run pulls exactly twice
-        // regardless of n; a double election would pull more.
-        //
-        // This is also the sharpest guard on how the workers are started. All
-        // `n` of them begin on one shared seed round, and `loop` claims from
-        // its cursor when called, so handing every worker one pre-built
-        // `loop(seed, 0)` would make each of them a fetcher and push the count
-        // past 2. See "Starting the workers" on `ChunkCursorDistributor.run`.
+        // regardless of n. A double election pulls more, and so does starting
+        // every worker from one pre-built `loop(seed)`: see "Starting the
+        // workers" on `ChunkCursorDistributor.run`.
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to 100)), Take.end)
         checkAll(Gen.fromIterable(Chunk(2, 16, 128))) { n =>
           for {
@@ -164,9 +157,6 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         } yield assertTrue(res.sorted == Vector(1, 2, 3)) && assertTrue(calls == script.length)
       } @@ nonFlaky(50),
       test("a clean end-of-stream never invokes onError") {
-        // `Cause.empty` doubles as the clean-EOS sentinel, and `stopOn` branches
-        // on `terminalCause.isEmpty`. A clean end must not be reported as a
-        // failure to any of the n workers.
         val script = Chunk(Take.chunk(Chunk(1, 2, 3)), Take.end)
         for {
           errors <- Ref.make(0)
@@ -176,10 +166,6 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         } yield assertTrue(res == 0)
       } @@ nonFlaky(50),
       test("a failure terminal is reported exactly once, whatever n is") {
-        // The fetcher that pulls a failing terminal is its sole reporter; the
-        // workers that later observe the terminal round do not re-report it. So
-        // one upstream failure yields exactly one cause no matter how many
-        // workers converge on it, matching the base combinator.
         val script = Chunk(Take.chunk(Chunk(1, 2, 3)), Take.fail("boom"))
         checkAll(Gen.fromIterable(Chunk(1, 2, 8, 64))) { n =>
           for {
@@ -192,9 +178,8 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         }
       } @@ nonFlaky(50),
       test("a callback failure is reported and the run still converges") {
-        // `f` failing routes through `foldCauseZIO(onError, ...)`, which stops
-        // that worker's loop. Interruption of the others is the caller's job, so
-        // here the run must still complete rather than hang.
+        // Interrupting the other workers is the caller's job, so here the run
+        // must still complete rather than hang.
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to 32)), Take.end)
         for {
           causes <- Ref.make(Vector.empty[Cause[String]])
@@ -217,9 +202,8 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         } yield assertTrue(res.exists(_.defects == List(boom)))
       } @@ nonFlaky(50),
       test("a single chunk keeps all n workers busy at once") {
-        // The design claim the cursor exists to satisfy: one chunk of >= n
-        // elements must saturate all n workers. Each element blocks until every
-        // worker has arrived, so the run completes only if they run together.
+        // Each element blocks until every worker has arrived, so the run
+        // completes only if all n run together.
         val n = 16
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to n)), Take.end)
         for {
@@ -234,13 +218,8 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         } yield assertCompletes
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("a chunk large enough to batch claims still keeps all n workers busy") {
-        // The saturation test above uses `length == n`, which sizes the stride to
-        // 1 and so only exercises per-element dispatch. Here the chunk is far
-        // larger than `n`, putting the stride above 1: batched claims must still
-        // reach every worker. They do because the stride leaves each worker
-        // several claims rather than exactly one: the property `ClaimsPerWorker`
-        // exists to guarantee, and the one a stride sized to `length / n` would
-        // lose.
+        // The test above has `length == n`, so its stride is 1. This chunk is
+        // large enough for batched claims, which must still reach every worker.
         val n = 16
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to (n * 64))), Take.end)
         for {
@@ -257,17 +236,9 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         } yield assertCompletes
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("claims partition the chunk at every length/n ratio") {
-        // The stride is derived from `length / (n * ClaimsPerWorker)`, so
-        // different length/n ratios exercise different strides, including the
-        // ratios where `length` is not a multiple of the stride and the final
-        // claim is short. Across all of them the claimed ranges must still
-        // partition the chunk: every element exactly once, none twice, none
-        // skipped.
-        //
-        // This is also the guard on fetcher election. A stride above 1 makes the
-        // cursor skip values, so an election test phrased in terms of `i` can
-        // elect nobody and hang; the run would then time out rather than fail an
-        // assertion.
+        // Different length/n ratios give different strides, including ones where
+        // the final claim is short. It also guards batched election: electing by
+        // `i == length` on a stride above 1 elects nobody, which times out here.
         checkAll(
           Gen.fromIterable(
             for {
@@ -304,9 +275,6 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         } yield assertTrue(res == Vector(1, 2, 3, 4, 5))
       } @@ nonFlaky(20),
       test("every element is claimed exactly once across many rounds") {
-        // The cursor's core guarantee, at the distributor level: no index is
-        // handed out twice and none is skipped, across many small rounds where
-        // fetcher election happens constantly.
         val chunks = Chunk.fromIterable((0 until 200).map(i => Chunk(i, i + 1000)))
         val script = chunks.map(Take.chunk) :+ Take.end
         val total = chunks.map(_.length).sum
@@ -317,8 +285,6 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
           res <- counts.get
         } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
       } @@ nonFlaky(50)
-      // Same rationale as RunForeachParSpec: a broken round handoff manifests as
-      // workers that never terminate, which would hang rather than fail. This
-      // aspect applies per test, not to the suite as a whole.
+      // Per test: a broken round handoff hangs rather than fails.
     ) @@ TestAspect.timeout(5.seconds)
 }

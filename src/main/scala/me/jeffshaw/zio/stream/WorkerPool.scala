@@ -101,27 +101,25 @@ import java.util.concurrent.atomic.AtomicInteger
 private[stream] object WorkerPool {
 
   /**
-   * Forks `n` copies of `worker` and completes when the last one exits.
+   * Forks `n` copies of `worker` and completes when the last one exits. As in
+   * the library version, a single worker is not forked at all and runs on the
+   * calling fiber.
    *
    * The workers are forked into the calling fiber's scope, so interrupting the
-   * returned effect interrupts all of them.
+   * returned effect interrupts all of them. Each worker counts itself down in
+   * `ensuring`, which runs on interruption too, so a fail-fast teardown cannot
+   * leave the final await hanging. The countdown only ever writes success, so
+   * its promise is `Promise[Nothing, Unit]` rather than the library's
+   * `Promise[Unit, Unit]`, and the await needs no fold.
    */
   def replicate[R, E](n: Int)(worker: => ZIO[R, E, Any])(implicit trace: Trace): ZIO[R, E, Unit] =
     n match {
       case 0 => Exit.unit
-      // As in the library version: a single worker needs no fork at all, and
-      // runs on the calling fiber.
       case 1 => worker.unit
       case size =>
         ZIO.uninterruptibleMask { restore =>
-          // `Promise[Nothing, Unit]`, not the library's `Promise[Unit, Unit]`:
-          // the countdown is the only writer and it only ever writes success,
-          // so the failure case is uninhabited and the await needs no fold.
           Promise.make[Nothing, Unit].flatMap { allDone =>
             val remaining = new AtomicInteger(size)
-            // `Exit.unit` is a singleton, so `done(Exit.unit)` allocates
-            // nothing: the substitution `FailureAccumulator` documents for the
-            // same `private[zio]` `succeedUnit`.
             val signalLast = ZIO.suspendSucceed {
               if (remaining.decrementAndGet() == 0) allDone.done(Exit.unit).unit
               else Exit.unit
@@ -130,9 +128,6 @@ private[stream] object WorkerPool {
             ZIO.foreachDiscard(0 until size) { _ =>
               restore(worker).ensuring(signalLast).fork
             } *>
-              // `ensuring` runs on interruption too, so the count reaches zero
-              // whether the workers complete or are interrupted, and a
-              // fail-fast teardown cannot leave this await hanging.
               restore(allDone.await)
           }
         }

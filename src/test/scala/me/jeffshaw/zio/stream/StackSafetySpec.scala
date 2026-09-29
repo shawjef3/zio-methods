@@ -21,20 +21,17 @@ import zio.stream._
 import zio.test._
 
 /**
- * Guards the dispatch loop against stack overflow when `f` returns an `Exit`.
+ * Guards the dispatch loop against recursing on the JVM stack when `f` returns
+ * an already-completed `Exit`, which `Dispatcher.loop` handles inline.
  *
- * `Exit` overrides `foldCauseZIO` to run its continuation inline rather than
- * returning to the ZIO interpreter, so an `f` such as `_ => Exit.unit` makes the
- * `loop`/`runClaim` cycle ordinary JVM recursion whose depth is the length of
- * the round rather than of a claim. `Round.MaxStride` bounds a claim and does
- * not bound this. Other synchronous effects, `ZIO.succeed` among them, are
- * evaluated by the interpreter's own loop and do not recurse.
+ * It used to recurse: `Exit` runs a `foldCauseZIO` continuation inline, so an
+ * `f` such as `_ => Exit.unit` made the dispatch cycle ordinary JVM recursion
+ * as deep as the round, and a single 200,000-element chunk overflowed. These
+ * tests keep any return to that shape from passing.
  *
- * These tests run on a thread with an explicitly small stack, because the
- * default `zio-test` fiber stack is generous enough to hide the bug: before the
- * `TrampolineEvery` fix, a 200,000-element chunk passed here on the default
- * stack and overflowed under JMH. Pinning the stack size is what makes the test
- * a reliable regression guard rather than an environment-dependent one.
+ * They run on a thread with an explicitly small stack, because the default
+ * `zio-test` fiber stack is generous enough to hide the bug: the 200,000-element
+ * chunk passed here on the default stack while overflowing under JMH.
  */
 object StackSafetySpec extends ZIOSpecDefault {
 
@@ -74,9 +71,6 @@ object StackSafetySpec extends ZIOSpecDefault {
   def spec =
     suite("stack safety")(
       test("a single large chunk with a synchronous f does not overflow") {
-        // One chunk, so this is a single round: the recursion depth is the whole
-        // 200k rather than anything `MaxStride` bounds. This is the case that
-        // failed before the fix.
         val chunk = Chunk.fromArray(Array.fill(200000)(1))
         for {
           escaped <- runOnSmallStack(ZStream.fromChunks(chunk).runForeachPar(4)(_ => Exit.unit))
@@ -104,8 +98,8 @@ object StackSafetySpec extends ZIOSpecDefault {
         } yield assertTrue(!escaped.exists(isStackOverflow))
       },
       test("every element still runs exactly once across the trampoline") {
-        // The trampoline resets a counter and re-enters `loop`; it must not skip
-        // or repeat an element at the boundary.
+        // The trampoline hands control back to the interpreter and re-enters
+        // `loop`; it must not skip or repeat an element at the boundary.
         val size = 20000
         val chunk = Chunk.fromArray(Array.tabulate(size)(identity))
         for {

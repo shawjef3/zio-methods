@@ -57,7 +57,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * elements, which is what the dispatch loop's cost is dominated by once `f` is
  * cheap. It is derived per round from `length / (n * ClaimsPerWorker)`, so it
  * engages only for rounds far larger than `n` and always leaves every worker
- * several claims, since the load balance a single shared cursor exists to provide is
+ * several claims, so the load balance a shared cursor exists to provide is
  * preserved, and a chunk of `>= n` elements still reaches all `n` workers.
  * Below that threshold the stride is 1 and dispatch is exactly per-element.
  *
@@ -74,9 +74,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * touching the cursor: the worker that published it loops onto it and returns,
  * and every worker awaiting the *previous* round's `next` receives it and hits
  * the same check. A terminal round's own `next` and cursor are therefore never
- * read, and are left null. This makes every worker
- * converge to termination without any worker blocking on a promise that nobody
- * will complete.
+ * read, and are left null. This makes every worker converge to termination
+ * without any worker blocking on a promise that nobody will complete.
  *
  * A terminal round carries no cause. The cause of a failing terminal is reported
  * to `onError` once, by the fetcher that pulled it, so a single upstream failure
@@ -124,7 +123,7 @@ private[stream] object ChunkCursorDistributor {
    *
    *   - Each worker must make its own first claim when it runs. `loop` claims
    *     from the cursor as soon as it is called, so one evaluated
-   *     `loop(seed, 0)` handed to every worker would make each of them the
+   *     `loop(seed)` handed to every worker would make each of them the
    *     seed's fetcher. [[Dispatcher.run]] starts them from a suspended effect,
    *     which makes that impossible.
    *   - [[WorkerPool]] forks with `fork`, not `forkDaemon`, so the workers are
@@ -137,10 +136,5 @@ private[stream] object ChunkCursorDistributor {
     f: A => ZIO[R, E1, Any],
     onError: Cause[E1] => ZIO[R, Nothing, Unit]
   )(implicit trace: Trace): ZIO[R, Nothing, Unit] =
-    // One dispatcher per run, shared by all `n` workers. Its fields are the
-    // state every step of the loop needs and none of it changes during the
-    // run, so holding them there keeps them off the recursive calls: as nested
-    // defs, `n`/`fetch`/`f`/`onError`/`trace` were lifted into every call's
-    // argument list, including the per-element ones.
     ZIO.suspendSucceed(new Dispatcher[R, E, E1, A](n, fetch, f, onError).run)
 }

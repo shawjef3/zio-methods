@@ -86,8 +86,6 @@ object DifferentialSpec extends ZIOSpecDefault {
     Outcome(
       visited = visited,
       succeeded = exit.isSuccess,
-      // Counted, not de-duplicated: one logical failure appearing n times is
-      // exactly the bug this suite exists to catch, and a `Set` would hide it.
       failures = tally(cause.toList.flatMap(_.failures)),
       defects = tally(cause.toList.flatMap(_.defects).map(_.getMessage)),
       interruptedOnly = cause.exists(_.isInterruptedOnly),
@@ -151,18 +149,8 @@ object DifferentialSpec extends ZIOSpecDefault {
       normalize = (o: Outcome) => if (countFailures) o else dropCounts(o)
     } yield
       if (base.succeeded && ours.succeeded)
-        // No interruption on the success path (`workerFiber.join` waits for
-        // every worker), so `visited` is a sound observable and the two runs
-        // must agree on it exactly.
         assertTrue(normalize(ours) == normalize(base))
       else {
-        // Under fail-fast, an element can be claimed by a worker that is then
-        // interrupted before its callback runs, so *which* elements were
-        // recorded is scheduling-dependent in both implementations. Comparing
-        // the two subsets would test whether two independent runs lost the same
-        // race, which base-vs-base would also fail. Compare everything else
-        // exactly, and hold `visited` to the invariants that are actually
-        // guaranteed.
         val strip = (o: Outcome) => normalize(o).copy(visited = Map.empty)
         val visitedOk = (o: Outcome) =>
           o.visited.values.forall(_ == 1) &&
@@ -209,8 +197,6 @@ object DifferentialSpec extends ZIOSpecDefault {
         }
       } @@ nonFlaky(10),
       test("stream fails after some elements") {
-        // The case that exposed the duplicated-cause bug: one upstream failure
-        // must surface identically however many workers observe it.
         checkAll(Gen.fromIterable(parallelisms)) { n =>
           equivalent(n, 16, elements = (0 until 64).toSet)(
             ZStream.range(0, 64, 8) ++ ZStream.fail("s-boom"),
@@ -252,9 +238,6 @@ object DifferentialSpec extends ZIOSpecDefault {
         }
       } @@ nonFlaky(10),
       test("callback fails on every element") {
-        // Several workers fail concurrently here, so occurrence counts are a
-        // race in both implementations; compare which failures appeared, not
-        // how many times.
         checkAll(Gen.fromIterable(parallelisms)) { n =>
           equivalent(n, 16, countFailures = false)(
             ZStream.fromChunk(Chunk.fromIterable(0 until 8)),
@@ -280,8 +263,6 @@ object DifferentialSpec extends ZIOSpecDefault {
           equivalent(n, 16)(ZStream.fromChunk(Chunk(42)), justRecord)
         }
       } @@ nonFlaky(10)
-      // Same rationale as the other specs: a broken handoff manifests as workers
-      // that never terminate, which would hang rather than fail. Applies per
-      // test, not to the suite as a whole.
+      // Per test: a broken round handoff hangs rather than fails.
     ) @@ TestAspect.timeout(30.seconds)
 }

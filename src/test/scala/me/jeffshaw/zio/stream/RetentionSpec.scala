@@ -24,14 +24,11 @@ import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
- * Rounds are linked forward through `Round#next`, so anything that still holds
- * an early round, such as a worker blocked in `f`, reaches every later round.
- * If a drained round kept its chunk, every chunk pulled since then would stay
- * reachable, so retention would grow with the length of the stream instead of
- * being bounded by `bufferSize`. And if anything held the seed for the whole
- * run, the round objects themselves would accumulate, one per round, for as
- * long as the run lasts. Both are invisible to correctness tests (every element
- * is still visited exactly once) and show up only as an OOM on a long stream.
+ * Guards against retention that correctness tests cannot see: every element is
+ * still visited exactly once, and the only symptom is an OOM on a long stream.
+ * Rounds link forward (see [[Round]]), so holding an early round, a drained
+ * round's chunk, or the seed all make retention grow with the stream rather
+ * than stay bounded by `bufferSize`.
  *
  * These tests measure reachability directly with weak references. The payload
  * tests hold the run open mid-flight by blocking one callback on the last
@@ -147,8 +144,6 @@ object RetentionSpec extends ZIOSpecDefault {
   private val total = 20000
   private val chunkSz = 100
   private val sampleOf = 100
-  // Blocking on the final element keeps the run in flight after every earlier
-  // element has been processed.
   private val blockAt = total - 1
 
   private def source =
@@ -236,12 +231,13 @@ object RetentionSpec extends ZIOSpecDefault {
     } yield alive
   }
 
+  private val idleAfter = 16
+
   /**
    * Runs `consume` over a stream that emits `idleAfter` chunks as fast as it
    * can and then emits nothing more, and reports how many payloads are
    * reachable once every element emitted has been processed.
    */
-  private val idleAfter = 16
   private def reachableWhileIdle(consume: (ZStream[Any, Nothing, Payload], Payload => UIO[Any]) => ZIO[Any, Any, Any]) =
     for {
       refs <- ZIO.succeed(new ConcurrentLinkedQueue[WeakReference[Payload]])
@@ -308,10 +304,7 @@ object RetentionSpec extends ZIOSpecDefault {
       } @@ TestAspect.timeout(120.seconds),
       test("a slow callback does not retain the rounds published while it runs") {
         // One worker stays inside `f` on the first element for the whole run
-        // while the others advance through every round. Its continuation used
-        // to hold the round it claimed from, and through `next` every round
-        // after it, so a single hung `f` retained all of them until it
-        // returned.
+        // while the others advance through every round.
         checkAll(Gen.fromIterable(Chunk(2, 4))) { n =>
           for {
             res <- roundsReachableDuringRun(n, blockFirst = true)
@@ -330,12 +323,9 @@ object RetentionSpec extends ZIOSpecDefault {
         } yield assertTrue(sampled == RoundCount / SampleEvery, alive == sampled)
       } @@ TestAspect.timeout(120.seconds),
       test("a callback hung inside a batched claim retains only its claim") {
-        // The continuation of an `f` that has not returned is reachable for as
-        // long as it runs. Mid-claim it used to hold the whole fused round it
-        // claimed from, up to `bufferSize` chunks, so each hung callback kept a
-        // round alive: measured 1697 payloads here, against 99 for
-        // `mapZIOParUnordered`. `n = 512` never batches a round this size, so
-        // it holds nothing either way and serves as the in-suite comparison.
+        // See `Dispatcher.continueAfter`. `n = 512` never batches a round this
+        // size, so it holds nothing either way and serves as the in-suite
+        // comparison.
         for {
           par <- reachableWithHungCallback(f => source.mapZIOParUnordered(64)(f).runDrain)
           unbatched <- reachableWithHungCallback(f => source.runForeachPar(512, 16)(f))
@@ -351,12 +341,9 @@ object RetentionSpec extends ZIOSpecDefault {
         } yield assertTrue(batched <= par + 2 * chunkSz, few <= par + 2 * chunkSz, unbatched <= par + 2 * chunkSz)
       } @@ TestAspect.withLiveClock @@ TestAspect.timeout(120.seconds),
       test("an idle stream does not keep the drained round") {
-        // Once every buffered element has been dispatched, the fetcher waits
-        // on the producer. The round it drained used to keep its fused chunk
-        // until the next one arrived, because it was released only after
-        // publishing: measured 400 to 1600 payloads, against the single
-        // 100-element chunk `runForeach` keeps, which is the stream
-        // machinery's own and is not ours to release.
+        // See `Dispatcher.release`. The baseline is `runForeach`, which keeps
+        // the stream machinery's own last chunk; that one is not ours to
+        // release.
         for {
           seq <- reachableWhileIdle((s, f) => s.runForeach(f))
           four <- reachableWhileIdle((s, f) => s.runForeachPar(4, 16)(f))

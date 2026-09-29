@@ -93,10 +93,6 @@ object RunForeachParSpec extends ZIOSpecDefault {
         }
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("single chunk saturates all workers (chunk transport, element dispatch)") {
-        // A stream of a *single* chunk with >= n elements must keep all n
-        // workers busy simultaneously: this proves chunk-granular transport
-        // with element-granular dispatch honors the concurrency contract,
-        // the failure mode that a whole-chunk-per-worker design suffers.
         val parallelism = 16
         for {
           latch <- CountdownLatch.make(parallelism)
@@ -106,9 +102,6 @@ object RunForeachParSpec extends ZIOSpecDefault {
         } yield assertCompletes
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("fetcher election: every element visited exactly once under many small chunks") {
-        // Many small chunks (sizes 1 and 2) under high n stress the
-        // `i == length` fetcher-election boundary. Assert every element is
-        // visited exactly once.
         val chunks = Chunk.fromIterable((0 until 500).map { i =>
           if (i % 2 == 0) Chunk.single(i) else Chunk(i, i + 1000)
         })
@@ -120,8 +113,6 @@ object RunForeachParSpec extends ZIOSpecDefault {
         } yield assert(res)(equalTo(expected))
       } @@ nonFlaky(50),
       test("terminal end mid-flight: no element dropped, all workers finish") {
-        // End-of-stream arrives while workers are mid-element. No preceding
-        // element may be dropped, and the run must terminate.
         val n = 32
         val total = 2000
         for {
@@ -146,9 +137,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
         } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
       } @@ nonFlaky(20),
       test("visits every element exactly once with many small chunks") {
-        // Small chunks under high `n` maximize how often the `i == length`
-        // fetcher-election boundary is crossed. A duplicate or dropped element
-        // at a round handoff shows up as a count != 1.
+        // Small chunks under high `n` cross the round boundary as often as
+        // possible; a duplicate or dropped element there shows as a count != 1.
         val chunks = Chunk.fromIterable((0 until 500).map { i =>
           if (i % 2 == 0) Chunk.single(i) else Chunk(i, i + 1000)
         })
@@ -177,11 +167,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
         }
       } @@ nonFlaky(20),
       test("terminal fused mid-batch is not lost (pendingTerminal)") {
-        // Fill the queue with several chunks *and* the end-of-stream `Take`
-        // before any worker fetches, so a single `takeBetween` batch contains
-        // both data and the terminal. The terminal must be parked in
-        // `pendingTerminal` and delivered after the fused data round drains:
-        // no element may be dropped, and the run must still terminate.
+        // Every chunk and the end-of-stream `Take` are queued before any worker
+        // fetches, so one batch holds both data and the terminal.
         val total = 64
         for {
           gate <- Promise.make[Nothing, Unit]
@@ -226,14 +213,12 @@ object RunForeachParSpec extends ZIOSpecDefault {
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("a concurrent failure is always recorded") {
         // How *many* concurrent failures get recorded is a race: the first
-        // failure fires `errorSignal`, and the interruption that follows can
+        // failure fires the fail-fast signal, and the interruption that follows can
         // beat the second worker's `onError`. The base combinator races the
         // same way, so asserting on the count would pin a scheduling outcome.
         //
-        // What is guaranteed: recording is sequenced before `errorSignal.done`
-        // inside `fail`, and interruption only ever follows that signal, so
-        // whichever failure fired the signal has already committed. Hence at
-        // least one failure, and nothing but the expected failures.
+        // At least one is guaranteed: `FailureAccumulator.record` commits a
+        // cause before it fires the signal that triggers interruption.
         for {
           latch <- CountdownLatch.make(2)
           exit <- ZStream(1, 2)
@@ -244,12 +229,11 @@ object RunForeachParSpec extends ZIOSpecDefault {
           assertTrue(failures.toSet.subsetOf(Set("boom-1", "boom-2")))
       } @@ TestAspect.jvmOnly @@ nonFlaky(50),
       test("both concurrent failures are reachable in one exit") {
-        // The relaxed assertion above cannot distinguish accumulation
-        // (`failure.unsafe.update(_ && cause)`) from replacement: keeping only
-        // the first failure also yields a one-element subset. Accumulation is
-        // instead pinned as a *reachability* property; recording both is a
-        // possible outcome, which a keep-first implementation could never
-        // produce, so the retry would exhaust its bound and fail.
+        // The assertion above cannot tell accumulation from replacement, since
+        // keeping only the first failure also yields a one-element subset. So
+        // accumulation is pinned as reachability: recording both is a possible
+        // outcome that a keep-first implementation could never produce, so the
+        // retry would exhaust its bound and fail.
         val attempt =
           for {
             latch <- CountdownLatch.make(2)
@@ -264,8 +248,6 @@ object RunForeachParSpec extends ZIOSpecDefault {
         } yield assertTrue(seen._1 == Set("boom-1", "boom-2"))
       } @@ TestAspect.jvmOnly,
       test("empty stream completes") {
-        // The seed round's designated fetcher immediately receives a terminal
-        // `Take`; every worker must converge to termination with no element.
         for {
           visited <- Ref.make(0)
           _ <- ZStream.empty.runForeachPar(8)(_ => visited.update(_ + 1))
@@ -273,8 +255,6 @@ object RunForeachParSpec extends ZIOSpecDefault {
         } yield assertTrue(res == 0)
       } @@ nonFlaky(20),
       test("non-positive n consumes the stream sequentially, in order") {
-        // Only `n <= 0` short-circuits to `ZStream#runForeach`. Such an `n` is
-        // treated as sequential rather than rejected; pin that behavior.
         checkAll(Gen.fromIterable(Chunk(-1, 0))) { n =>
           for {
             visited <- Ref.make(Chunk.empty[Int])
@@ -329,11 +309,9 @@ object RunForeachParSpec extends ZIOSpecDefault {
         } yield assertTrue(res == 1)
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("n == 1 overlaps stream consumption with f") {
-        // The reason `n == 1` no longer degrades to `runForeach`: the producer
-        // fills the buffer while `f` runs. With a buffer of 8 and a gated `f`,
-        // the stream must be pulled well past the first element before the
-        // first invocation of `f` is allowed to complete, which cannot happen
-        // if pulling and `f` share one fiber.
+        // With a buffer of 8 and a gated `f`, the stream must be pulled past the
+        // first element before `f` completes, which cannot happen if pulling
+        // and `f` share one fiber.
         for {
           pulled <- Ref.make(0)
           gate <- Promise.make[Nothing, Unit]
@@ -350,17 +328,13 @@ object RunForeachParSpec extends ZIOSpecDefault {
         } yield assertTrue(res > 1)
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("a defect in the callback is not swallowed") {
-        // `Cause.empty` is the sentinel for a clean end-of-stream, and defects
-        // travel the same `foldCauseZIO` path as typed failures.
         val boom = new RuntimeException("die")
         val effect = ZStream.range(0, 100).runForeachPar(8)(_ => ZIO.die(boom))
         assertZIO(effect.exit)(dies(equalTo(boom)))
       } @@ nonFlaky(20),
       test("a callback that throws before returning its effect fails the run, whatever n is") {
-        // The dispatch loop calls `f` directly, so a throw here is the worker's
-        // own death rather than a failure of `f`'s effect. It used to be lost
-        // for any `n` above 1: the run succeeded a worker short, or, when every
-        // element threw, abandoned the stream and still succeeded.
+        // A throw here kills the worker rather than failing `f`'s effect; see
+        // `Dispatcher.run`.
         val boom = new RuntimeException("thrown building the effect")
         checkAll(Gen.fromIterable(Chunk(1, 2, 8)) <*> Gen.fromIterable(Chunk(false, true))) { case (n, everyElement) =>
           val f: Int => UIO[Unit] = a => {
@@ -376,8 +350,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
         assertZIO(effect.exit)(dies(equalTo(boom)))
       } @@ nonFlaky(20),
       test("the environment is available to the callback") {
-        // `provideSomeEnvironment[R1](_.add[Scope](childScope))` on the
-        // producer must not strip `R1` from the workers' environment.
+        // The workers are forked into a child scope and must still see the
+        // caller's environment.
         val total = 100
         val effect =
           for {
@@ -393,8 +367,8 @@ object RunForeachParSpec extends ZIOSpecDefault {
         // worker B where it is parked.
         //
         // This pins the topology, not just the outcome: all `n` workers live
-        // under the single `workerFiber`, so interrupting the losing side of
-        // `workerFiber.join.raceFirst(errorSignal.await)` reaches them.
+        // under the single `workerFiber`, so closing its scope after
+        // `workerFiber.join.raceFirst(failures.await)` reaches them.
         // `ZChannel#mapOutZIOParUnordered` needs an explicit `scope.close` in
         // its `awaitErrorSignal` for the same guarantee, because there the
         // raced effect is a forked pull loop that does not own the per-element
@@ -422,8 +396,6 @@ object RunForeachParSpec extends ZIOSpecDefault {
         } yield assert(exit)(fails(equalTo("boom"))) && assertTrue(res == 0)
       } @@ TestAspect.jvmOnly @@ nonFlaky(50),
       test("fail-fast after terminal failure round") {
-        // A failure must promptly short-circuit the run even when it arrives
-        // as a terminal round after successful elements.
         val effect =
           (ZStream.range(0, 100) ++ ZStream.fail("boom"))
             .runForeachPar(8)(_ => ZIO.unit)

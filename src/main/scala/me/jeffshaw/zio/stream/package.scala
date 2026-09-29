@@ -33,16 +33,8 @@ package object stream {
      * callback, executing up to `n` invocations of `f` concurrently. The element
      * order is not enforced by this combinator.
      *
-     * Unlike [[zio.stream.ZStream#mapZIOParUnordered]] followed by
-     * [[zio.stream.ZStream#runDrain]], this combinator does not emit the results
-     * of `f` downstream, and so avoids the overhead of buffering and re-chunking
-     * them. Prefer it when the results of `f` are not needed.
-     *
-     * If any invocation of `f` fails, the remaining in-flight invocations are
-     * interrupted and the returned effect fails. Because interruption is not
-     * instantaneous, more than one failure can be recorded before the workers
-     * stop; the returned effect fails with all of them combined, rather than
-     * with only the first.
+     * The overload that also takes `bufferSize`, called here with 16, documents
+     * how the work is distributed and how failures are reported.
      */
     def runForeachPar[R1 <: R, E1 >: E](n: => Int)(f: A => ZIO[R1, E1, Any])(implicit
       trace: Trace
@@ -94,68 +86,36 @@ package object stream {
     ): ZIO[R1, E1, Unit] =
       ZIO.suspendSucceed {
         val nn = n
-        // Clamped once here, for the queue and the fetcher alike: `Queue.bounded`
+        // Clamped once, for the queue and the fetcher alike: `Queue.bounded`
         // dies on a non-positive capacity.
         val bufferSizeV = bufferSize max 1
-        // Only a non-positive `n` falls back to sequential consumption, where
-        // "no workers" has no sensible forked meaning. `n == 1` takes the normal
-        // forked path: it means "one element at a time", not "no pipelining".
-        // `runForeach` would interleave pulling and `f` on a single fiber, so a
-        // stream with real producer latency would stall while `f` runs, and
-        // `bufferSize` would be silently ignored.
         if (nn <= 0) self.runForeach(f)
         else
           ZIO.scopedWith { scope =>
             for {
-              // Chunk-granular transport: `Take`s move through the queue (one box
-              // per chunk, not per element), while workers dispatch individual
-              // elements out of the current chunk via a shared atomic cursor
-              // (`ChunkCursorDistributor`). This bounds concurrency at the element
-              // level (matching `mapZIOParUnordered`) without a chunk boundary
-              // barrier, and without the per-element `Exit.Success` boxing of an
-              // element-granular queue.
               queue <- Queue.bounded[Take[E, A]](bufferSizeV)
               _ <- scope.addFinalizer(queue.shutdown)
               childScope <- scope.fork
               fiberId <- ZIO.fiberId
-              // Holds whether the run failed, why, and the fail-fast signal, as
-              // one mechanism. See `FailureAccumulator` for the invariants that
-              // keeping them together enforces, in particular that an
-              // interruption-only cause fires the signal without being recorded.
               failures <- FailureAccumulator.make[E1]
-              // Producer: feed the stream's chunks into the queue as `Take`s,
-              // terminated by `Take.end` on end-of-stream or `Take.failCause` on
-              // error. `runForeachChunk` runs the stream straight into one sink
-              // whose effect per chunk is the offer, where `runIntoQueueScoped`
-              // layers a writer channel, a per-chunk `mapOutZIO` and a `drain`
-              // over it. When chunks are small the producer is what bounds the
-              // run, so those layers are paid on the critical path. A failure,
-              // defect or interruption of the stream itself arrives here as the
-              // stream's cause, exactly as the writer would have turned it into a
-              // `Take`; interruption of this fiber by the scope never reaches the
-              // handler.
+              // The producer: the stream's chunks go into the queue as `Take`s,
+              // ended by `Take.end` or by `Take.failCause` with the stream's own
+              // failure, defect or interruption. `runForeachChunk` rather than
+              // `runIntoQueueScoped`, which layers a writer channel, a per-chunk
+              // `mapOutZIO` and a `drain` over the same work; with small chunks
+              // the producer bounds the run. Interruption of this fiber by the
+              // scope never reaches the handler.
               _ <- self
                 .runForeachChunk(chunk => queue.offer(Take.chunk(chunk)))
                 .foldCauseZIO(cause => queue.offer(Take.failCause(cause)), _ => queue.offer(Take.end))
                 .forkIn(childScope)
-              // Batched fetch: one round spans every chunk already buffered
-              // rather than exactly one, which keeps the round boundary rare,
-              // along with the wake-herd it causes when `n` exceeds the chunk size.
-              // See `BatchingFetch` for why, and for the terminal parking that
-              // makes a batch containing end-of-stream safe. Built once per run.
               fetch = BatchingFetch.effect[E, A](queue, bufferSizeV, nn)
-              // `n` workers claim elements from the shared cursor and apply `f`. A
-              // worker that finishes an element immediately claims the next, so
-              // there is no barrier between chunks; a single chunk keeps all `n`
-              // workers busy.
               worker = ChunkCursorDistributor.run[R1, E, E1, A](nn, fetch, f, failures.record)
               workerFiber <- worker.forkIn(childScope)
-              // Wait for the workers to finish, unless a failure signals
-              // fail-fast first, in which case interrupt them.
+              // Whichever comes first, the workers finishing or a recorded
+              // failure; closing the scope then interrupts whatever still runs.
               _ <- workerFiber.join.raceFirst(failures.await)
               _ <- childScope.close(Exit.interrupt(fiberId))
-              // `Exit.unit` when the run never failed, otherwise the accumulated
-              // cause, which is empty for an interruption-only failure.
               _ <- failures.result.flatten
             } yield ()
           }

@@ -23,15 +23,10 @@ import zio.stacktracer.TracingImplicits.disableAutoTrace
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * The fetcher's half of the `runForeachPar` protocol: pulls chunk-granular
- * [[Take]]s out of a queue in batches and fuses them into a single [[Take]], so
- * one dispatch round spans every chunk that was already buffered rather than
- * exactly one.
- *
- * The designated fetcher drains every chunk already buffered (at least one;
- * `takeBetween(1, max)` suspends only when the queue is empty) and fuses them
- * into a single `Take`, so one round spans up to `bufferSize` chunks instead of
- * one.
+ * The fetcher's half of the `runForeachPar` protocol: drains every chunk already
+ * buffered in the queue (at least one; `takeBetween(1, max)` suspends only when
+ * the queue is empty) and fuses them into a single [[Take]], so one dispatch
+ * round spans up to `bufferSize` chunks rather than exactly one.
  *
  * Why: when `n` is much larger than the chunk size, a round has fewer elements
  * than workers, and every round publish wakes all overflow workers at once to
@@ -125,9 +120,25 @@ private[stream] final class BatchingFetch[E, A] private (
   private[stream] def parked: Exit[Option[E], Chunk[A]] = pendingTerminal.get
 
   /**
-   * The fetch effect handed to [[ChunkCursorDistributor]]. Call it once per run
-   * and reuse the result, as [[BatchingFetch.apply]] does: the per-round cost is
-   * then the suspension and the pull, not rebuilding the effect.
+   * The fetch effect handed to [[ChunkCursorDistributor]]: the parked terminal
+   * if there is one, otherwise the next fused batch.
+   *
+   * `batchMax` bounds the batch in ''chunks'', but what a round needs is
+   * elements: at one element per chunk the default of 16 yields a 16-element
+   * round, the regime measured ~20x slower than 64-element chunks at equal
+   * element count. So when the batch holds fewer than `fuseTarget` elements it
+   * keeps draining with `takeAll`, which never blocks (it returns empty if the
+   * queue is dry) and so cannot add latency or stall a slow producer. For chunks
+   * of any real size the first take already clears the target and the drain is
+   * skipped.
+   *
+   * Measured on `FetchPathBenchmark` at one element per chunk, the regime this
+   * targets, at `-f 5 -wi 10 -i 10`: +4.1% at `n = 4` (4.211 ± 0.069 to 4.382 ±
+   * 0.057 ops/s) and +9.4% at `n = 64` (2.789 ± 0.044 to 3.052 ± 0.068), both
+   * separated, with fork spreads under 10%. The gain grows with `n` because the
+   * target does: a 16-chunk batch holds 16 elements against a target of 512 at
+   * `n = 64`, versus 32 at `n = 4`. At 64- and 512-element chunks every point
+   * was flat, the control this needed to pass.
    */
   private[stream] def effect(implicit trace: Trace): ZIO[Any, Nothing, Take[E, A]] =
     ZIO.suspendSucceed {
@@ -135,29 +146,6 @@ private[stream] final class BatchingFetch[E, A] private (
       if (parked ne null) Exit.succeed(Take(parked))
       else
         queue.takeBetween(1, batchMax).flatMap { takes =>
-          // `batchMax` bounds the batch in *chunks*, but what a round needs is
-          // elements: at one element per chunk the default of 16 yields a
-          // 16-element round, which is the regime measured ~20x slower than
-          // 64-element chunks at equal element count.
-          //
-          // So when the batch is element-poor, keep draining. `takeAll` never
-          // blocks (it returns empty if the queue is dry), so this cannot add
-          // latency or stall a slow producer, and it is skipped entirely once
-          // the first take already clears the target, which is the common case
-          // for chunks of any real size.
-          //
-          // Measured on `FetchPathBenchmark` at one element per chunk, the
-          // regime this targets, re-run at `-f 5 -wi 10 -i 10`:
-          //
-          //   n = 4:  4.211 +/- 0.069 to 4.382 +/- 0.057 ops/s, +4.1%
-          //   n = 64: 2.789 +/- 0.044 to 3.052 +/- 0.068 ops/s, +9.4%
-          //
-          // Both separate, with fork spreads under 10%. The gain is larger at
-          // `n = 64` because the target scales with `n`: a 16-chunk batch holds
-          // 16 elements against a target of 512 there, versus 32 at `n = 4`, so
-          // the drain has more to add. At 64- and 512-element chunks the first
-          // take already meets the target and every point was flat, which is
-          // the control this needed to pass.
           if (elementsAtLeast(takes, fuseTarget)) Exit.succeed(split(takes))
           else queue.takeAll.map(more => split(if (more.isEmpty) takes else takes ++ more))
         }
@@ -165,7 +153,8 @@ private[stream] final class BatchingFetch[E, A] private (
 
   /**
    * Whether `takes` carries at least `target` elements, stopping as soon as it
-   * does.
+   * does. A terminal also stops the scan, contributing nothing: there is no
+   * point draining further for elements that cannot be dispatched before it.
    *
    * Short-circuiting matters: this runs per round, and for chunks of any real
    * size the first take settles it.
@@ -178,8 +167,6 @@ private[stream] final class BatchingFetch[E, A] private (
         case Exit.Success(chunk) =>
           total += chunk.length
           i += 1
-        // A terminal contributes nothing, and stops the scan: there is no point
-        // draining further for elements that cannot be dispatched before it.
         case _ =>
           i = takes.length
       }
@@ -201,7 +188,7 @@ private[stream] object BatchingFetch {
     else
       Take.chunk(data.flatMap(_.exit match {
         case Exit.Success(chunk) => chunk
-        case _ => Chunk.empty // unreachable: terminals are split off by `split`
+        case _ => Chunk.empty
       }))
 
   /**
@@ -230,10 +217,7 @@ private[stream] object BatchingFetch {
       ((n.toLong max 1L) * FuseTargetClaimsPerWorker min Int.MaxValue.toLong).toInt
     )
 
-  /**
-   * The per-run fetch effect over `queue`. Built once here, so a round pays only
-   * the suspension and the pull.
-   */
+  /** Builds the per-run fetcher over `queue` and returns its [[BatchingFetch#effect]]. */
   def effect[E, A](queue: Queue[Take[E, A]], bufferSize: Int, n: Int)(implicit
     trace: Trace
   ): ZIO[Any, Nothing, Take[E, A]] =
