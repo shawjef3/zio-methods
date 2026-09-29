@@ -1,24 +1,15 @@
 # me.jeffshaw.zio methods
 
-Standalone home for stream combinators built on published ZIO, extracted from a
-ZIO fork rather than merged upstream. Depends on `dev.zio %% zio-streams %
-2.1.26`; targets the same Java (11) and Scala (2.12/2.13/3.3) versions as ZIO.
+Standalone home for stream combinators built on published ZIO, extracted from a ZIO fork rather than merged upstream. Depends on `dev.zio %% zio-streams % 2.1.26`; targets the same Java (11) and Scala (2.12/2.13/3.3) versions as ZIO.
 
 ## What's here
 
-- `runForeachPar`: added to `ZStream` as an extension method
-  (`me.jeffshaw.zio.stream.ZStreamMethods`). Consumes all elements, running up
-  to `n` invocations of `f` concurrently, without emitting results downstream.
-  Semantics match `mapZIOParUnordered`: up to `n` concurrent, unordered, results
-  discarded, first failure interrupts the rest and fails fast.
-- `Dispatcher`: the chunk-transport / element-dispatch engine
-  behind `runForeachPar`.
+- `runForeachPar`: added to `ZStream` as an extension method (`me.jeffshaw.zio.stream.ZStreamMethods`). Consumes all elements, running up to `n` invocations of `f` concurrently, without emitting results downstream. Semantics match `mapZIOParUnordered`: up to `n` concurrent, unordered, results discarded, first failure interrupts the rest and fails fast.
+- `Dispatcher`: the chunk-transport / element-dispatch engine behind `runForeachPar`.
 
 ## Which combinator do I want?
 
-`runForeachPar` is narrow on purpose: it is the fastest way to run an effect
-over every element **when you do not need the results and do not need order**.
-Two questions settle it: do you need what `f` returns, and is `f` worth a fiber?
+`runForeachPar` is narrow on purpose: it is the fastest way to run an effect over every element **when you do not need the results and do not need order**. Two questions settle it: do you need what `f` returns, and is `f` worth a fiber?
 
 ```
 Do you need f's results downstream?
@@ -39,37 +30,23 @@ Do you need f's results downstream?
 | effects only, costly `f` | **`runForeachPar(n)(f)`** | n/a |
 | effects only, whole chunk at a time | `runForeachChunk(f)` | hands `f` elements, not chunks |
 
-The last row is the one people reach for when `f` amortizes over a batch: a
-bulk insert, a batched API call. Note that `runForeachChunk` runs chunks
-*sequentially*; ZIO has no parallel variant of it. To get batching and
-concurrency together, regroup so each element is itself a batch and hand that
-to `runForeachPar`, where `n` then bounds concurrent *batches*:
+The last row is the one people reach for when `f` amortizes over a batch: a bulk insert, a batched API call. Note that `runForeachChunk` runs chunks *sequentially*; ZIO has no parallel variant of it. To get batching and concurrency together, regroup so each element is itself a batch and hand that to `runForeachPar`, where `n` then bounds concurrent *batches*:
 
 ```scala
 stream.grouped(100).runForeachPar(4)(batch => insertAll(batch))
 ```
 
-Sizing `n`: it bounds concurrent invocations of `f`, so set it to what the
-*downstream resource* tolerates: a connection-pool size, an API rate limit,
-`availableProcessors` for CPU-bound work. It is not a thread count; the workers
-are fibers, and tens of thousands of them are routine for I/O-bound `f` (see
-the high-concurrency numbers under [Performance](#performance)).
+Sizing `n`: it bounds concurrent invocations of `f`, so set it to what the *downstream resource* tolerates: a connection-pool size, an API rate limit, `availableProcessors` for CPU-bound work. It is not a thread count; the workers are fibers, and tens of thousands of them are routine for I/O-bound `f` (see the high-concurrency numbers under [Performance](#performance)).
 
 ### Sizing `bufferSize` and chunks
 
-The second argument, `bufferSize` (default 16), sets how many chunks may be in
-flight ahead of the workers. It is also the fusion window: the designated
-fetcher drains everything buffered and fuses it into one round, so the round a
-worker pool sees is
+The second argument, `bufferSize` (default 16), sets how many chunks may be in flight ahead of the workers. It is also the fusion window: the designated fetcher drains everything buffered and fuses it into one round, so the round a worker pool sees is
 
 ```
 fused round elements  =  bufferSize × chunkSize     (when the queue is full)
 ```
 
-**`bufferSize` counts chunks, not elements**, which is the easy mistake. It is
-not a quantity to compare against `n`. Setting `bufferSize = n` at `n = 2250`
-with 500-element chunks would hold 1.1 million records resident. The quantity
-that should exceed `n` is the product:
+**`bufferSize` counts chunks, not elements**, which is the easy mistake. It is not a quantity to compare against `n`. Setting `bufferSize = n` at `n = 2250` with 500-element chunks would hold 1.1 million records resident. The quantity that should exceed `n` is the product:
 
 ```
 chunkSize × bufferSize  ≥  n × 2..8     round covers the pool a few times over
@@ -77,20 +54,11 @@ chunkSize               ≳  64           below this, per-chunk queue overhead d
 chunkSize × bufferSize  ≤  heap budget  these records are resident
 ```
 
-A round sized to exactly `n` gives each worker one element and drains in a
-single pass, putting you back at a round boundary immediately, hence the
-factor above 1. Solving for the parameter, `bufferSize ≈ (n / chunkSize) × 2..8`:
-at `n = 2250` with 500-element chunks that is 16–32, not thousands.
+A round sized to exactly `n` gives each worker one element and drains in a single pass, putting you back at a round boundary immediately, hence the factor above 1. Solving for the parameter, `bufferSize ≈ (n / chunkSize) × 2..8`: at `n = 2250` with 500-element chunks that is 16–32, not thousands.
 
-Two ceilings cap this regardless of the arithmetic. The queue only ever holds
-what the producer has actually produced, since `takeBetween` returns immediately
-with whatever is there, so raising `bufferSize` past what the source can stay
-ahead of buys nothing. Measured with a producer-limited source, the curve
-flattens fast: +49.7% from 1 to 4, then +17.1% to 16, then -1.0% to 64, against
-4.4× across the same range when the producer is free.
+Two ceilings cap this regardless of the arithmetic. The queue only ever holds what the producer has actually produced, since `takeBetween` returns immediately with whatever is there, so raising `bufferSize` past what the source can stay ahead of buys nothing. Measured with a producer-limited source, the curve flattens fast: +49.7% from 1 to 4, then +17.1% to 16, then -1.0% to 64, against 4.4× across the same range when the producer is free.
 
-And the benefit is making round boundaries rarer, which runs out quickly. With
-a free producer, 64-element chunks and `n = 4`:
+And the benefit is making round boundaries rarer, which runs out quickly. With a free producer, 64-element chunks and `n = 4`:
 
 | `bufferSize` | ops/s | step |
 |---|---|---|
@@ -99,45 +67,19 @@ a free producer, 64-element chunks and `n = 4`:
 | 16 | 372.5 ± 48.5 | +93% |
 | 64 | 417.1 ± 25.3 | +12% |
 
-The gains run out between 16 and 64: the first two steps roughly double
-throughput each, and the last adds 12%, which is inside the error bars of the
-two points it spans. So the default of 16 is about where this stops paying on an
-in-memory source, and 64 is not reliably better than 16.
+The gains run out between 16 and 64: the first two steps roughly double throughput each, and the last adds 12%, which is inside the error bars of the two points it spans. So the default of 16 is about where this stops paying on an in-memory source, and 64 is not reliably better than 16.
 
-**Should you `rechunk` first?** Usually no. Dispatch is element-granular, so a
-single chunk of `≥ n` elements already saturates all `n` workers. Chunk size
-matters far less here than in a combinator where a worker owns a whole chunk.
-It is worth rechunking when the source emits pathologically small chunks, one
-element per callback, say. There `rechunk` is the fix, and raising `bufferSize`
-is not: measured at one element per chunk with `n = 4`, `rechunk(512)` is about
-4× `asIs` (18.7 ± 0.2 vs 4.6 ± 1.6 ops/s) while `bufferSize = 256` reaches only
-5.4 ± 1.1, inside `asIs`'s error bar. The `asIs` figure is the noisiest point in
-this README even at four forks, so read the ratio as approximate; the gap is far
-larger than the spread.
+**Should you `rechunk` first?** Usually no. Dispatch is element-granular, so a single chunk of `≥ n` elements already saturates all `n` workers. Chunk size matters far less here than in a combinator where a worker owns a whole chunk. It is worth rechunking when the source emits pathologically small chunks, one element per callback, say. There `rechunk` is the fix, and raising `bufferSize` is not: measured at one element per chunk with `n = 4`, `rechunk(512)` is about 4× `asIs` (18.7 ± 0.2 vs 4.6 ± 1.6 ops/s) while `bufferSize = 256` reaches only 5.4 ± 1.1, inside `asIs`'s error bar. The `asIs` figure is the noisiest point in this README even at four forks, so read the ratio as approximate; the gap is far larger than the spread.
 
-That asymmetry follows from the ceiling above. `bufferSize` only caps how many
-chunks a fetch *may* fuse; it cannot conjure chunks the producer has not
-queued, and it never makes a chunk bigger. `rechunk` changes the chunks
-themselves, so it is the only one of the two that fixes chunk size. The copy it
-costs is real, and on a slow source it adds latency while it waits to fill a
-chunk, but at one element per chunk the per-round overhead it removes dwarfs
-both.
+That asymmetry follows from the ceiling above. `bufferSize` only caps how many chunks a fetch *may* fuse; it cannot conjure chunks the producer has not queued, and it never makes a chunk bigger. `rechunk` changes the chunks themselves, so it is the only one of the two that fixes chunk size. The copy it costs is real, and on a slow source it adds latency while it waits to fill a chunk, but at one element per chunk the per-round overhead it removes dwarfs both.
 
-Chunks already in the hundreds (what a Kafka consumer or a JDBC cursor
-typically yields) want little or no reshaping: at 64 elements per chunk the
-three variants sit within 13% of each other (69.5 / 78.7 / 75.8 ops/s) and at
-512 within 14% (73.0 / 74.5 / 83.2), spreads comparable to the error bars on the
-individual points. Whatever is left is not worth a copy.
+Chunks already in the hundreds (what a Kafka consumer or a JDBC cursor typically yields) want little or no reshaping: at 64 elements per chunk the three variants sit within 13% of each other (69.5 / 78.7 / 75.8 ops/s) and at 512 within 14% (73.0 / 74.5 / 83.2), spreads comparable to the error bars on the individual points. Whatever is left is not worth a copy.
 
-All of this is dispatch tuning, and dispatch stops being what governs
-throughput once `f` is slow, so see the next section before spending time here.
+All of this is dispatch tuning, and dispatch stops being what governs throughput once `f` is slow, so see the next section before spending time here.
 
 ### When `f` is slow, this combinator stops being the variable
 
-Everything above is about dispatch overhead, which is tens of nanoseconds per
-element. Once `f` takes milliseconds (a database round trip, an HTTP call),
-that overhead is several orders of magnitude below the work, and throughput is
-governed by Little's law instead:
+Everything above is about dispatch overhead, which is tens of nanoseconds per element. Once `f` takes milliseconds (a database round trip, an HTTP call), that overhead is several orders of magnitude below the work, and throughput is governed by Little's law instead:
 
 ```
 records/s  ≈  n / mean_latency_of_f
@@ -145,208 +87,81 @@ records/s  ≈  n / mean_latency_of_f
 
 Two consequences worth knowing before spending time on tuning.
 
-**Size `n` off the mean, not the median.** Service latencies are usually right
-skewed, so the mean sits above the median and the two diverge by more than you
-would guess. A distribution with a 185 ms median and a 165 ms standard
-deviation (log-normal) has a mean nearer 230 ms, so sizing `n` off the median
-over-predicts throughput by roughly a quarter. Solve `n = target_rate × mean`
-then check that `n` against what the downstream resource will actually run
-concurrently; beyond that point the extra workers queue inside the client
-library, where this combinator can neither see nor help them.
+**Size `n` off the mean, not the median.** Service latencies are usually right skewed, so the mean sits above the median and the two diverge by more than you would guess. A distribution with a 185 ms median and a 165 ms standard deviation (log-normal) has a mean nearer 230 ms, so sizing `n` off the median over-predicts throughput by roughly a quarter. Solve `n = target_rate × mean` then check that `n` against what the downstream resource will actually run concurrently; beyond that point the extra workers queue inside the client library, where this combinator can neither see nor help them.
 
-**The choice among the parallel combinators stops mattering.** At that
-latency, `runForeachPar` and `mapZIOParUnordered(n)(f).runDrain` will measure
-the same, because what separates them is per-element bookkeeping that has
-become a rounding error. Pick on semantics instead: `runForeachPar` because
-it discards results and has no chunk boundary barrier, not because it is
-faster. The measured advantages in [Performance](#performance) are real, but
-they are advantages in a regime your workload has left.
+**The choice among the parallel combinators stops mattering.** At that latency, `runForeachPar` and `mapZIOParUnordered(n)(f).runDrain` will measure the same, because what separates them is per-element bookkeeping that has become a rounding error. Pick on semantics instead: `runForeachPar` because it discards results and has no chunk boundary barrier, not because it is faster. The measured advantages in [Performance](#performance) are real, but they are advantages in a regime your workload has left.
 
-The lever that does still move a latency-bound pipeline is reducing the number
-of round trips: batch at the source (`grouped`, above) so each `f` covers many
-records. That divides the latency across the batch, which no amount of
-dispatch tuning can do.
+The lever that does still move a latency-bound pipeline is reducing the number of round trips: batch at the source (`grouped`, above) so each `f` covers many records. That divides the latency across the batch, which no amount of dispatch tuning can do.
 
 ### Caveats worth knowing before you adopt it
 
-- **Results are discarded.** `f`'s return value is dropped. If you need it,
-  you want `mapZIOPar*` and the buffering that comes with it, and that cost is
-  what you are paying for, not waste.
-- **Order is not preserved**, and there is no chunk boundary barrier: element
-  *k+1* may start before element *k* finishes.
-- **Fail-fast, but not fail-first.** The first failure interrupts the rest,
-  and because interruption is not instantaneous, more than one failure can be
-  recorded. The effect fails with all of them combined (`Cause.Both`), not
-  with whichever was first. Match on the cause accordingly.
+- **Results are discarded.** `f`'s return value is dropped. If you need it, you want `mapZIOPar*` and the buffering that comes with it, and that cost is what you are paying for, not waste.
+- **Order is not preserved**, and there is no chunk boundary barrier: element *k+1* may start before element *k* finishes.
+- **Fail-fast, but not fail-first.** The first failure interrupts the rest, and because interruption is not instantaneous, more than one failure can be recorded. The effect fails with all of them combined (`Cause.Both`), not with whichever was first. Match on the cause accordingly.
 - **`bufferSize <= 0` is treated as 1**, not rejected, matching how `ZIO.foreachParDiscard` degrades a non-positive parallelism instead of failing.
-- **`n <= 0` degrades to sequential** `runForeach`, ignoring `bufferSize`.
-  `n == 1` does *not*: it keeps the worker topology, so the stream is still
-  consumed concurrently with `f`. That topology is not free, and its payoff is
-  unverified: measured against `runForeach`, `n == 1` costs 1.35× with a free
-  producer, ties inside error with a CPU-bound one, and ties exactly with a
-  parked producer, which is where the overlap should have paid. Re-measuring
-  with the JVM pinned to 4 cores moves none of it (1.38×, tie, tie), so the
-  core count is not what hides the benefit, and the earlier "it only ran on 4
-  cores" caveat does not apply. The parked case is timer-dominated, so this
-  remains "no regime found where it wins" rather than "no such regime exists".
-  Prefer `runForeach` for `n == 1` unless you have measured your own producer.
+- **`n <= 0` degrades to sequential** `runForeach`, ignoring `bufferSize`. `n == 1` does *not*: it keeps the worker topology, so the stream is still consumed concurrently with `f`. That topology is not free, and its payoff is unverified: measured against `runForeach`, `n == 1` costs 1.35× with a free producer, ties inside error with a CPU-bound one, and ties exactly with a parked producer, which is where the overlap should have paid. Re-measuring with the JVM pinned to 4 cores moves none of it (1.38×, tie, tie), so the core count is not what hides the benefit, and the earlier "it only ran on 4 cores" caveat does not apply. The parked case is timer-dominated, so this remains "no regime found where it wins" rather than "no such regime exists". Prefer `runForeach` for `n == 1` unless you have measured your own producer.
 
 ## Design
 
-`runForeachPar` exists because `mapZIOParUnordered(n)(f).runDrain` pays to
-buffer and re-chunk results that are then thrown away. Discarding them up front
-is worth roughly two orders of magnitude in throughput.
+`runForeachPar` exists because `mapZIOParUnordered(n)(f).runDrain` pays to buffer and re-chunk results that are then thrown away. Discarding them up front is worth roughly two orders of magnitude in throughput.
 
 Four decisions shape the implementation.
 
 ### Transport is chunk-granular; dispatch is element-granular
 
-A pool of `n` long-lived worker fibers is fed by a producer fiber writing
-`Take[E, A]` chunks into a bounded queue. Workers do *not* claim whole chunks:
-they claim individual elements out of the current chunk via a shared
-`AtomicInteger` cursor.
+A pool of `n` long-lived worker fibers is fed by a producer fiber writing `Take[E, A]` chunks into a bounded queue. Workers do *not* claim whole chunks: they claim individual elements out of the current chunk via a shared `AtomicInteger` cursor.
 
-Keeping these two granularities separate is the central idea. Chunk transport
-keeps queue traffic proportional to chunks rather than elements, and avoids
-boxing every element into an `Exit`. Element dispatch preserves the concurrency
-contract: with a single chunk of 1000 elements and `n = 64`, all 64 workers run
-concurrently, because they claim elements rather than chunks. A design where a
-worker owns a whole chunk starves workers whenever there are fewer chunks than
-`n`, and is what the "single chunk saturates all workers" test guards against.
+Keeping these two granularities separate is the central idea. Chunk transport keeps queue traffic proportional to chunks rather than elements, and avoids boxing every element into an `Exit`. Element dispatch preserves the concurrency contract: with a single chunk of 1000 elements and `n = 64`, all 64 workers run concurrently, because they claim elements rather than chunks. A design where a worker owns a whole chunk starves workers whenever there are fewer chunks than `n`, and is what the "single chunk saturates all workers" test guards against.
 
-There is no barrier at chunk boundaries (a worker that finishes an element
-immediately claims the next), so one slow `f` never idles the other workers.
+There is no barrier at chunk boundaries (a worker that finishes an element immediately claims the next), so one slow `f` never idles the other workers.
 
 The round/cursor protocol itself: a *round* holds a chunk, a cursor, a claim size, and a promise for the next round. Each worker claims a range with `i = cursor.getAndAdd(claimSize)`; `i < length` runs `f` over `[i, min(i + claimSize, length))`, `i >= length` means the round is drained and elects one worker as the designated fetcher, and a worker that is not elected awaits the next round. A terminal round signals end of stream or failure, and is detected before the cursor is touched. It carries no cause: the fetcher that pulled a failure reports it once, however many workers observe the terminal round.
 
 ### Claims are batched only where batching is free
 
-Once `f` is cheap, the cost of dispatch is the cursor's atomic operation, paid
-per element. A worker therefore claims a contiguous *range* of `claimSize` elements
-per atomic and runs them without returning to the cursor.
+Once `f` is cheap, the cost of dispatch is the cursor's atomic operation, paid per element. A worker therefore claims a contiguous *range* of `claimSize` elements per atomic and runs them without returning to the cursor.
 
-The claim size is what makes this safe. It is derived per round as
-`length / (n * 8)`, capped at 64: every worker is left at least eight claims, so
-a worker that draws one oversized claim is at most an eighth of the round behind
-the rest, whatever `f` costs. Below `n * 8` elements per round the quotient is
-zero, the claim size pins to 1, and dispatch is exactly per-element again, so the
-"single chunk saturates all `n` workers" guarantee holds unchanged, and a slow
-`f`, where a round rarely has that many elements per worker, never batches at
-all.
+The claim size is what makes this safe. It is derived per round as `length / (n * 8)`, capped at 64: every worker is left at least eight claims, so a worker that draws one oversized claim is at most an eighth of the round behind the rest, whatever `f` costs. Below `n * 8` elements per round the quotient is zero, the claim size pins to 1, and dispatch is exactly per-element again, so the "single chunk saturates all `n` workers" guarantee holds unchanged, and a slow `f`, where a round rarely has that many elements per worker, never batches at all.
 
-The two bounds are not equivalent, which matters. `length / (n * 8)` bounds the
-tail in units of *work*, whatever `f` costs, and that is what makes it sound
-when `cost(f)` is unknown. The cap is an absolute element count, so wherever it
-binds it replaces that guarantee with "at most 64 elements, however long those
-take". Raising it to 256 measured +14% with a uniform cheap `f` and **−11% with
-clustered expensive elements**, which is the tail the cap exists to bound; 64
-improves both. A change to the cap therefore has to be measured against
-`SkewedCostBenchmark` and not only against the uniform benchmarks, because a
-uniform `f` cannot produce a straggler and so cannot detect the regression.
+The two bounds are not equivalent, which matters. `length / (n * 8)` bounds the tail in units of *work*, whatever `f` costs, and that is what makes it sound when `cost(f)` is unknown. The cap is an absolute element count, so wherever it binds it replaces that guarantee with "at most 64 elements, however long those take". Raising it to 256 measured +14% with a uniform cheap `f` and **−11% with clustered expensive elements**, which is the tail the cap exists to bound; 64 improves both. A change to the cap therefore has to be measured against `SkewedCostBenchmark` and not only against the uniform benchmarks, because a uniform `f` cannot produce a straggler and so cannot detect the regression.
 
-Sizing claims to give each worker *one* claim (`length / n`) was tried first
-and measured 7–9% **slower** at `n` in the thousands with a 5 ms `f`: with one
-claim apiece the round ends when the slowest single claim ends, so a 16-element
-claim serialized 80 ms behind everyone else. Requiring several claims per worker
-keeps the amortization where `f` is cheap and restores fine-grained balance
-where it is not.
+Sizing claims to give each worker *one* claim (`length / n`) was tried first and measured 7–9% **slower** at `n` in the thousands with a 5 ms `f`: with one claim apiece the round ends when the slowest single claim ends, so a 16-element claim serialized 80 ms behind everyone else. Requiring several claims per worker keeps the amortization where `f` is cheap and restores fine-grained balance where it is not.
 
 A round with claim size 1 claims with `getAndIncrement` rather than `getAndAdd(1)` and allocates no election flag, so in the slow-`f` regime, where rounds rarely batch, batching costs no allocation and no extra atomic operation.
 
-A claim size above 1 also changes how the fetcher is elected. With single-element claims the
-cursor's values are consecutive, so exactly one worker sees `i == length` and
-that test elects it for free. A larger claim size makes the values skip, so none need
-land on `length` at all and the same test would elect *nobody* and hang the run;
-batched rounds elect by CAS on a per-round flag instead. `claims partition the
-chunk at every length/n ratio` is the regression test for this: reverting the
-election to `i == length` makes it deadlock rather than fail quietly.
+A claim size above 1 also changes how the fetcher is elected. With single-element claims the cursor's values are consecutive, so exactly one worker sees `i == length` and that test elects it for free. A larger claim size makes the values skip, so none need land on `length` at all and the same test would elect *nobody* and hang the run; batched rounds elect by CAS on a per-round flag instead. `claims partition the chunk at every length/n ratio` is the regression test for this: reverting the election to `i == length` makes it deadlock rather than fail quietly.
 
 ### The producer fiber and queue are deliberate
 
-A queue-less variant, where the fetching worker pulls the stream directly
-(`ZStream#toPull`), allocates ~29% less and is CPU-neutral on in-memory
-sources. It was measured and rejected.
+A queue-less variant, where the fetching worker pulls the stream directly (`ZStream#toPull`), allocates ~29% less and is CPU-neutral on in-memory sources. It was measured and rejected.
 
-The precondition is a source that cannot keep the workers fed: the stream
-producing more slowly than the pool consumes. When the fetcher is itself a
-worker, nothing is queued behind it while it waits, so the remaining workers
-idle once the current chunk drains. The producer fiber keeps filling the queue
-across that wait, holding up to `bufferSize` of work in flight, and that is
-worth more than the allocation it costs.
+The precondition is a source that cannot keep the workers fed: the stream producing more slowly than the pool consumes. When the fetcher is itself a worker, nothing is queued behind it while it waits, so the remaining workers idle once the current chunk drains. The producer fiber keeps filling the queue across that wait, holding up to `bufferSize` of work in flight, and that is worth more than the allocation it costs.
 
-But a slow producer alone does not reproduce the collapse. `slowUpstream` is
-already producer-limited (throughput falls monotonically with `upstreamCost`:
-226 / 137 / 57 / 7.1 ops/s at 0 / 200 / 2000 / 20000, `n = 4`), and the
-queue-less variant is CPU-neutral on it. What the ~44% loss needs in addition
-is a pull that *parks*: a socket, a queue, a JDBC cursor, any async API. A
-suspended pull costs a scheduler wake to resume on top of the wait, where a
-slow on-CPU pull merely occupies the fiber.
+But a slow producer alone does not reproduce the collapse. `slowUpstream` is already producer-limited (throughput falls monotonically with `upstreamCost`: 226 / 137 / 57 / 7.1 ops/s at 0 / 200 / 2000 / 20000, `n = 4`), and the queue-less variant is CPU-neutral on it. What the ~44% loss needs in addition is a pull that *parks*: a socket, a queue, a JDBC cursor, any async API. A suspended pull costs a scheduler wake to resume on top of the wait, where a slow on-CPU pull merely occupies the fiber.
 
-`StreamParBenchmark.zioRunForeachParBlockingUpstream` supplies that shape (a
-bounded queue with a small buffer, so the consumer really does out-run it and
-the pull really does suspend) and guards against reintroducing the queue-less
-design. Keeping it alongside `zioRunForeachParSlowUpstream` is what separates
-"the producer is slow" from "the producer parks"; only the second sinks the
-queue-less shape.
+`StreamParBenchmark.zioRunForeachParBlockingUpstream` supplies that shape (a bounded queue with a small buffer, so the consumer really does out-run it and the pull really does suspend) and guards against reintroducing the queue-less design. Keeping it alongside `zioRunForeachParSlowUpstream` is what separates "the producer is slow" from "the producer parks"; only the second sinks the queue-less shape.
 
 ### The fetcher drains the whole buffer, not one chunk
 
-The designated fetcher takes *every* buffered chunk (`takeBetween(1,
-bufferSize)`) and fuses them into a single round.
+The designated fetcher takes *every* buffered chunk (`takeBetween(1, bufferSize)`) and fuses them into a single round.
 
-This matters when `n` is much larger than the chunk size. With single-chunk
-rounds, a round holds fewer elements than there are workers, so every round
-boundary wakes all the overflow workers at once to race for the next chunk: a
-thundering herd, hundreds of times per second at high `n`. Fusing multiplies the
-elements per round by the number of buffered chunks, making those boundaries
-proportionally rarer. Dispatch stays element-granular, so load balance and the
-concurrency contract are unchanged. A single-chunk batch is returned as-is, so
-the low-`n` regime pays nothing for the fusion path. A terminal `Take` arriving
-mid-batch is split off and parked for the next fetch.
+This matters when `n` is much larger than the chunk size. With single-chunk rounds, a round holds fewer elements than there are workers, so every round boundary wakes all the overflow workers at once to race for the next chunk: a thundering herd, hundreds of times per second at high `n`. Fusing multiplies the elements per round by the number of buffered chunks, making those boundaries proportionally rarer. Dispatch stays element-granular, so load balance and the concurrency contract are unchanged. A single-chunk batch is returned as-is, so the low-`n` regime pays nothing for the fusion path. A terminal `Take` arriving mid-batch is split off and parked for the next fetch.
 
-`bufferSize` therefore sets both the pipelining depth and the fusion window, but
-it bounds the batch in *chunks* while what a round needs is *elements*. At one
-element per chunk the default of 16 yields a 16-element round, which is the
-regime measured roughly 20× slower than 64-element chunks at equal element
-count. So when a batch falls short of `n * 8` elements, the same threshold below
-which the claim size pins to 1 and claim batching does not engage at all, the
-fetcher keeps draining with a non-blocking `takeAll`. That cannot add latency or
-stall a slow producer, since `takeAll` returns empty on a dry queue, and it is
-skipped entirely once the first take already clears the target, which is the
-common case for chunks of any real size. Measured at one element per chunk:
-+4.1% at `n = 4` and +9.4% at `n = 64`, with 64- and 512-element chunks flat.
+`bufferSize` therefore sets both the pipelining depth and the fusion window, but it bounds the batch in *chunks* while what a round needs is *elements*. At one element per chunk the default of 16 yields a 16-element round, which is the regime measured roughly 20× slower than 64-element chunks at equal element count. So when a batch falls short of `n * 8` elements, the same threshold below which the claim size pins to 1 and claim batching does not engage at all, the fetcher keeps draining with a non-blocking `takeAll`. That cannot add latency or stall a slow producer, since `takeAll` returns empty on a dry queue, and it is skipped entirely once the first take already clears the target, which is the common case for chunks of any real size. Measured at one element per chunk: +4.1% at `n = 4` and +9.4% at `n = 64`, with 64- and 512-element chunks flat.
 
 ### Notes
 
-- `n <= 0` short-circuits to `runForeach`. `n == 1` does not, as the caveats
-  above explain: it keeps the worker topology.
+- `n <= 0` short-circuits to `runForeach`. `n == 1` does not, as the caveats above explain: it keeps the worker topology.
 - Everything here uses public ZIO API. `Promise#done(Exit.unit)` stands in for the `private[zio]` `succeedUnit` (`Exit.unit` is a singleton, so it allocates nothing either), and a terminal round has no `next` promise at all, so there is none to complete.
-- The workers are started by `WorkerPool` rather than by
-  `ZIO.foreachParDiscard`, which is what the library call resolves to. That
-  version retains a `Chunk` of all `n` `Fiber.Runtime`s for the length of the
-  run, because it forks each worker onto the global scope and can only interrupt
-  them by holding them. Forking into the run's own scope makes interruption
-  structural and retains nothing, which matters at the `n` this combinator
-  advertises. It is a retention win, not a throughput one.
+- The workers are started by `WorkerPool` rather than by `ZIO.foreachParDiscard`, which is what the library call resolves to. That version retains a `Chunk` of all `n` `Fiber.Runtime`s for the length of the run, because it forks each worker onto the global scope and can only interrupt them by holding them. Forking into the run's own scope makes interruption structural and retains nothing, which matters at the `n` this combinator advertises. It is a retention win, not a throughput one.
 
 ## Performance
 
-Throughput is the optimization target; allocation is treated as a diagnostic.
-The two rank differently often enough that scoring on allocation alone is
-misleading. A `ZIO.whileLoop` worker loop, for instance, cut allocation by
-23–38% while costing ~30% throughput, and was reverted.
+Throughput is the optimization target; allocation is treated as a diagnostic. The two rank differently often enough that scoring on allocation alone is misleading. A `ZIO.whileLoop` worker loop, for instance, cut allocation by 23–38% while costing ~30% throughput, and was reverted.
 
-Measured on 32 cores, JMH throughput mode, at `-f 2` with 5 warmup and 5
-measurement iterations unless a table says otherwise. Scores below are ± the JMH
-error over several forks; the `n = 4` benchmarks in particular vary enough fork to
-fork that single-fork runs are not comparable, so read them across forks or not
-at all.
+Measured on 32 cores, JMH throughput mode, at `-f 2` with 5 warmup and 5 measurement iterations unless a table says otherwise. Scores below are ± the JMH error over several forks; the `n = 4` benchmarks in particular vary enough fork to fork that single-fork runs are not comparable, so read them across forks or not at all.
 
-Every figure in this README comes from that one host, including the numbers in
-"Sizing `bufferSize` and chunks" and in the `rechunk` and `n == 1` notes, so
-they are comparable to each other. The one exception is the 4-core column of the
-`n` sweep in the crossover section, which is the same host with the benchmark
-JVM pinned to four cores, and is labelled where it appears.
+Every figure in this README comes from that one host, including the numbers in "Sizing `bufferSize` and chunks" and in the `rechunk` and `n == 1` notes, so they are comparable to each other. The one exception is the 4-core column of the `n` sweep in the crossover section, which is the same host with the benchmark JVM pinned to four cores, and is labelled where it appears.
 
 Combinator overhead, 500k elements, no-op `f`, `n = 4` (`StreamParBenchmark`):
 
@@ -356,8 +171,7 @@ Combinator overhead, 500k elements, no-op `f`, `n = 4` (`StreamParBenchmark`):
 | `runForeachChunk` + `foreachParDiscard` | 10.6 ± 0.3 |
 | `mapZIOParUnordered().runDrain` | 0.31 ± 0.04 |
 
-High-concurrency IO-like `f`: 200k elements, 2000-element chunks,
-`f = ZIO.sleep(5ms)` (`RealisticParBenchmark`):
+High-concurrency IO-like `f`: 200k elements, 2000-element chunks, `f = ZIO.sleep(5ms)` (`RealisticParBenchmark`):
 
 | `n` | `runForeachPar` | stream-free control |
 |---|---|---|
@@ -365,31 +179,13 @@ High-concurrency IO-like `f`: 200k elements, 2000-element chunks,
 | 16,384 | 440k | 417k |
 | 40,960 | 409k | 398k |
 
-(Measured at `-f 2 -wi 3 -i 5`. This benchmark is sensitive to the warmup
-settings, so compare variants only within one configuration. At `n = 2048` the
-5 ms sleep pins the score almost deterministically, within 0.3% across ten
-iterations; the larger `n` vary by a few percent because there is real scheduling
-work to do.)
+(Measured at `-f 2 -wi 3 -i 5`. This benchmark is sensitive to the warmup settings, so compare variants only within one configuration. At `n = 2048` the 5 ms sleep pins the score almost deterministically, within 0.3% across ten iterations; the larger `n` vary by a few percent because there is real scheduling work to do.)
 
-At that scale, with a 5 ms `f`, the binding constraint is the ZIO runtime's own
-fiber wake and timer path rather than this combinator: `runForeachPar` runs at or
-slightly above the stream-free
-`ZIO.foreachParDiscard(...).withParallelism(n)` control in the last column, by
-5.5% at `n = 16384` and 2.8% at `n = 40960`. The dip from 16k to 41k is the
-runtime degrading past ~16k fibers, and it moves the control too, which is what
-places the cause outside this combinator.
+At that scale, with a 5 ms `f`, the binding constraint is the ZIO runtime's own fiber wake and timer path rather than this combinator: `runForeachPar` runs at or slightly above the stream-free `ZIO.foreachParDiscard(...).withParallelism(n)` control in the last column, by 5.5% at `n = 16384` and 2.8% at `n = 40960`. The dip from 16k to 41k is the runtime degrading past ~16k fibers, and it moves the control too, which is what places the cause outside this combinator.
 
-That holds only while `f` is slow enough to dominate. With a cheap `f` the
-combinator's own round-publish wake becomes the constraint, and it is severe:
-`WakeHerdBenchmark` measures throughput at `n = 16384` as 0.9% of the `n = 4`
-figure with 16-element chunks, against 6.1% with 2048-element chunks. Same fiber
-count and same total work, so the difference is how many workers a round can
-occupy, which is what the wake walk scales with. **A cheap `f` wants a small
-`n`**, which the crossover section already says for a different reason.
+That holds only while `f` is slow enough to dominate. With a cheap `f` the combinator's own round-publish wake becomes the constraint, and it is severe: `WakeHerdBenchmark` measures throughput at `n = 16384` as 0.9% of the `n = 4` figure with 16-element chunks, against 6.1% with 2048-element chunks. Same fiber count and same total work, so the difference is how many workers a round can occupy, which is what the wake walk scales with. **A cheap `f` wants a small `n`**, which the crossover section already says for a different reason.
 
-With a parking `f`, the shape this combinator is for, raising `n` still pays but
-stops paying proportionally much earlier than `n` suggests. Against the Little's
-law ideal of `n / mean_latency`, with a 200 microsecond parked `f`:
+With a parking `f`, the shape this combinator is for, raising `n` still pays but stops paying proportionally much earlier than `n` suggests. Against the Little's law ideal of `n / mean_latency`, with a 200 microsecond parked `f`:
 
 | `n` | elements/s | ideal | efficiency |
 |---|---|---|---|
@@ -398,18 +194,13 @@ law ideal of `n / mean_latency`, with a 200 microsecond parked `f`:
 | 1,024 | 620,060 | 5,120,000 | 12% |
 | 4,096 | 509,660 | 20,480,000 | 2.5% |
 
-Throughput peaks near `n = 1024` and declines after, so **sizing `n` beyond a few
-hundred buys progressively less and beyond ~1000 buys nothing**, well below the
-tens of thousands the high-concurrency numbers above might suggest. The cause is
-the per-round wake, which `WakeHerdBenchmark` isolates.
+Throughput peaks near `n = 1024` and declines after, so **sizing `n` beyond a few hundred buys progressively less and beyond ~1000 buys nothing**, well below the tens of thousands the high-concurrency numbers above might suggest. The cause is the per-round wake, which `WakeHerdBenchmark` isolates.
 
 Batching does not engage in this regime at all, since rounds hold fewer than `n * 8` elements and the claim size is 1.
 
 ### Where parallelism starts paying
 
-With a cheap `f`, sequential `runForeach` beats any parallel variant, because the
-workers are coordination overhead with nothing to divide. `CrossoverBenchmark`
-sweeps the cost of `f` against both, 100k elements, `n = 4`:
+With a cheap `f`, sequential `runForeach` beats any parallel variant, because the workers are coordination overhead with nothing to divide. `CrossoverBenchmark` sweeps the cost of `f` against both, 100k elements, `n = 4`:
 
 | `f` cost (multiply-add iterations) | `runForeach` | `runForeachPar(4)` | faster |
 |---|---|---|---|
@@ -418,14 +209,9 @@ sweeps the cost of `f` against both, 100k elements, `n = 4`:
 | 1,000 | 83.9 ± 1.4 | 94.2 ± 5.3 | **parallel, 1.12×** |
 | 5,000 | 23.2 ± 0.1 | 61.9 ± 1.9 | **parallel, 2.7×** |
 
-The crossover sits between 200 and 1,000 iterations, and the parallel advantage
-keeps growing past it. It is bounded by cores, so with `n = 4` it tends toward
-4×. Below the crossover the penalty is real but bounded, peaking at 1.7× with a
-free `f` and shrinking as `f` grows, rather than growing.
+The crossover sits between 200 and 1,000 iterations, and the parallel advantage keeps growing past it. It is bounded by cores, so with `n = 4` it tends toward 4×. Below the crossover the penalty is real but bounded, peaking at 1.7× with a free `f` and shrinking as `f` grows, rather than growing.
 
-**That crossover is for `n = 4`, and it moves with the core count.** Sweeping `n`
-at 1,000 iterations on the same host, once with all 32 cores and once with the
-benchmark JVM pinned to 4, parallel throughput relative to sequential is:
+**That crossover is for `n = 4`, and it moves with the core count.** Sweeping `n` at 1,000 iterations on the same host, once with all 32 cores and once with the benchmark JVM pinned to 4, parallel throughput relative to sequential is:
 
 | `n` | 32 cores | 4 cores |
 |---|---|---|
@@ -433,66 +219,30 @@ benchmark JVM pinned to 4, parallel throughput relative to sequential is:
 | 4 | 1.25× | **1.16×** |
 | 32 | **1.33×** | 1.06× |
 
-The best `n` tracks the cores available: 4 wins when 4 are available, 32 wins
-when 32 are. That is the point worth taking away, because it distinguishes
-"a well-matched `n` wins" from "`n = 4` wins", which a single-core-count sweep
-cannot tell apart. Under-provisioning leaves work on the table, and
-over-provisioning adds coordination the cores cannot absorb. So read the table
-above as "the crossover for a well-matched `n`", and expect a worse one if `n`
-is far from the core count for CPU-bound `f`.
+The best `n` tracks the cores available: 4 wins when 4 are available, 32 wins when 32 are. That is the point worth taking away, because it distinguishes "a well-matched `n` wins" from "`n = 4` wins", which a single-core-count sweep cannot tell apart. Under-provisioning leaves work on the table, and over-provisioning adds coordination the cores cannot absorb. So read the table above as "the crossover for a well-matched `n`", and expect a worse one if `n` is far from the core count for CPU-bound `f`.
 
-This is guidance for sizing `n`, not something the library should infer. For the
-I/O-bound `f` this combinator is built for, the right `n` follows the downstream
-resource and is routinely in the thousands, unrelated to the core count; and
-`availableProcessors` under-reports or misreports inside containers with CPU
-quotas. The internal knobs that do scale with parallelism, the claim size and
-the fusion target, already key off `n` rather than the core count, which is the
-correct choice whenever the two differ.
+This is guidance for sizing `n`, not something the library should infer. For the I/O-bound `f` this combinator is built for, the right `n` follows the downstream resource and is routinely in the thousands, unrelated to the core count; and `availableProcessors` under-reports or misreports inside containers with CPU quotas. The internal knobs that do scale with parallelism, the claim size and the fusion target, already key off `n` rather than the core count, which is the correct choice whenever the two differ.
 
-Both arms ran on the same 32-core host, JDK and image, with the 4-core arm
-produced by pinning the forked JVM to four physical cores on one socket, so the
-core count is the only variable between the columns. It is not a small machine:
-four cores of a 32-core socket keep the whole L3 and memory bandwidth, so a real
-4-vCPU host would likely penalize over-provisioning harder than the table shows.
+Both arms ran on the same 32-core host, JDK and image, with the 4-core arm produced by pinning the forked JVM to four physical cores on one socket, so the core count is the only variable between the columns. It is not a small machine: four cores of a 32-core socket keep the whole L3 and memory bandwidth, so a real 4-vCPU host would likely penalize over-provisioning harder than the table shows.
 
-These are iteration counts, not times: attempts to calibrate them to nanoseconds
-were defeated by the JIT hoisting the loop, so treat the column as an ordinal
-scale on this machine. The practical reading is that a few hundred arithmetic
-operations per element is roughly the break-even point, and that anything doing
-real I/O is far past it.
+These are iteration counts, not times: attempts to calibrate them to nanoseconds were defeated by the JIT hoisting the loop, so treat the column as an ordinal scale on this machine. The practical reading is that a few hundred arithmetic operations per element is roughly the break-even point, and that anything doing real I/O is far past it.
 
 ## Layout
 
 - `stream` (root): the library and its `zio-test` specs.
-- `benchmarks`: JMH subproject (sbt-jmh), ZIO-only benchmarks (the
-  Akka/fs2/cats-effect comparisons from the original ZIO benchmark were
-  dropped).
-  - `StreamParBenchmark`: combinator overhead against alternatives, plus
-    slow-upstream and blocking-upstream regression guards.
-  - `CrossoverBenchmark`: `runForeachPar` vs. sequential `runForeach` across a
-    sweep of `f` costs and of `n`, locating where parallelism starts paying.
-  - `RealisticParBenchmark`: high-concurrency IO-like `f`, with a stream-free
-    control benchmark for the runtime ceiling.
-  - `FetchPathBenchmark`: the per-round `fetch` path in isolation, swept over
-    chunk size so that per-round cost scales against a fixed element count.
-  - `BufferSizeBenchmark`: `bufferSize` against producer speed, for the
-    diminishing-returns and "past what the source sustains" claims above.
-  - `ChunkShapeBenchmark`: `rechunk` vs. leaving the source alone vs. a larger
-    `bufferSize`, across source chunk sizes.
-  - `GroupedBatchBenchmark`: the `grouped(k).runForeachPar(n)` idiom against an
-    unbatched control doing the same total work.
-  - `SingleWorkerBenchmark`: `n == 1` against `runForeach` across free, CPU-bound
-    and parked producers, with `n == 0` as a delegation control.
-  - `WorkerStartupBenchmark`: pool setup and teardown, using a tiny stream and a
-    growing `n` so a run is dominated by starting workers rather than by work.
-  - `WakeHerdBenchmark`: the per-round wake cost, sweeping `n` past what the
-    work can use, with `chunkSize` varying how many workers a round can occupy
-    and `fCost` deciding whether the cost matters.
-  - `SkewedCostBenchmark`: tail imbalance, with expensive elements clustered so
-    one claim can land entirely on them. This is the benchmark a change to
-    `Round.MaxClaimSize` has to pass; a uniform `f` cannot produce a straggler.
-  - `ElementTypeBenchmark`: what the element type costs, which is why the others
-    use a reference type rather than `Chunk[Int]`.
+- `benchmarks`: JMH subproject (sbt-jmh), ZIO-only benchmarks (the Akka/fs2/cats-effect comparisons from the original ZIO benchmark were dropped).
+  - `StreamParBenchmark`: combinator overhead against alternatives, plus slow-upstream and blocking-upstream regression guards.
+  - `CrossoverBenchmark`: `runForeachPar` vs. sequential `runForeach` across a sweep of `f` costs and of `n`, locating where parallelism starts paying.
+  - `RealisticParBenchmark`: high-concurrency IO-like `f`, with a stream-free control benchmark for the runtime ceiling.
+  - `FetchPathBenchmark`: the per-round `fetch` path in isolation, swept over chunk size so that per-round cost scales against a fixed element count.
+  - `BufferSizeBenchmark`: `bufferSize` against producer speed, for the diminishing-returns and "past what the source sustains" claims above.
+  - `ChunkShapeBenchmark`: `rechunk` vs. leaving the source alone vs. a larger `bufferSize`, across source chunk sizes.
+  - `GroupedBatchBenchmark`: the `grouped(k).runForeachPar(n)` idiom against an unbatched control doing the same total work.
+  - `SingleWorkerBenchmark`: `n == 1` against `runForeach` across free, CPU-bound and parked producers, with `n == 0` as a delegation control.
+  - `WorkerStartupBenchmark`: pool setup and teardown, using a tiny stream and a growing `n` so a run is dominated by starting workers rather than by work.
+  - `WakeHerdBenchmark`: the per-round wake cost, sweeping `n` past what the work can use, with `chunkSize` varying how many workers a round can occupy and `fCost` deciding whether the cost matters.
+  - `SkewedCostBenchmark`: tail imbalance, with expensive elements clustered so one claim can land entirely on them. This is the benchmark a change to `Round.MaxClaimSize` has to pass; a uniform `f` cannot produce a straggler.
+  - `ElementTypeBenchmark`: what the element type costs, which is why the others use a reference type rather than `Chunk[Int]`.
 
 ## Running
 
@@ -503,13 +253,6 @@ sbt "benchmarks/Jmh/run -f 1 RealisticParBenchmark"
 sbt "benchmarks/Jmh/run -f 2 CrossoverBenchmark"
 ```
 
-`Test/testOnly *` rather than `test`: under sbt 2.x, `test` runs `testQuick`,
-which skips specs it believes are unaffected. On an unchanged tree it reports
-`No tests to run for Test / testQuick`, and after a partial change it reports a
-reduced count, both of which read as success. This is sbt's own default rather
-than anything this build configures, so it applies to any sbt 2 project.
+`Test/testOnly *` rather than `test`: under sbt 2.x, `test` runs `testQuick`, which skips specs it believes are unaffected. On an unchanged tree it reports `No tests to run for Test / testQuick`, and after a partial change it reports a reduced count, both of which read as success. This is sbt's own default rather than anything this build configures, so it applies to any sbt 2 project.
 
-Benchmarks want a quiet machine, and a laptop is not one: clock boost depends on
-die temperature and recent history, so two identical runs minutes apart execute
-at different speeds. Run each parameter point as its own JVM invocation, since a
-single sweep lets JIT state from earlier points distort later ones.
+Benchmarks want a quiet machine, and a laptop is not one: clock boost depends on die temperature and recent history, so two identical runs minutes apart execute at different speeds. Run each parameter point as its own JVM invocation, since a single sweep lets JIT state from earlier points distort later ones.
