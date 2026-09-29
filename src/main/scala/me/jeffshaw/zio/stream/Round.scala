@@ -154,7 +154,7 @@ private[stream] object Round {
    * `n` is at least 1: `runForeachPar` hands a non-positive `n` to
    * `runForeach` before any round exists.
    */
-  def claimSizeFor(length: Int, n: Int): Int =
+  private def claimSizeFor(length: Int, n: Int): Int =
     ((length / (n.toLong * ClaimsPerWorker)).toInt max 1) min MaxClaimSize
 
   def data[A](chunk: Chunk[A], n: Int): Round[A] = {

@@ -19,7 +19,6 @@ package me.jeffshaw.zio.stream
 import zio._
 import zio.stream.Take
 import zio.test._
-import zio.test.Assertion._
 import zio.test.TestAspect.nonFlaky
 
 /**

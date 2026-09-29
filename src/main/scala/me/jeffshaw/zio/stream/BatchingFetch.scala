@@ -217,10 +217,4 @@ private[stream] object BatchingFetch {
       // every batch look like it had already met it.
       (n.toLong * FuseTargetElementsPerWorker min Int.MaxValue.toLong).toInt
     )
-
-  /** Builds the per-run fetcher over `queue` and returns its [[BatchingFetch#fetch]]. */
-  def fetch[E, A](queue: Queue[Take[E, A]], bufferSize: Int, n: Int)(implicit
-    trace: Trace
-  ): ZIO[Any, Nothing, Take[E, A]] =
-    apply[E, A](queue, bufferSize, n).fetch
 }

@@ -110,7 +110,7 @@ package object stream {
                 .foldCauseZIO(cause => queue.offer(Take.failCause(cause)), _ => queue.offer(Take.end))
                 .forkIn(childScope)
               workerFiber <- Dispatcher
-                .run[R1, E1, A](workers, BatchingFetch.fetch[E, A](queue, bufferChunks, workers), f, failures.record)
+                .run[R1, E1, A](workers, BatchingFetch[E, A](queue, bufferChunks, workers).fetch, f, failures.record)
                 .forkIn(childScope)
               // Whichever comes first, the workers finishing or a recorded
               // failure; closing the scope then interrupts whatever still runs.
