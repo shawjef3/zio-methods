@@ -120,10 +120,7 @@ private[stream] object WorkerPool {
         ZIO.uninterruptibleMask { restore =>
           Promise.make[Nothing, Unit].flatMap { allDone =>
             val remaining = new AtomicInteger(size)
-            val signalLast = ZIO.suspendSucceed {
-              if (remaining.decrementAndGet() == 0) allDone.done(Exit.unit).unit
-              else Exit.unit
-            }
+            val signalLast = allDone.done(Exit.unit).when(remaining.decrementAndGet() == 0)
 
             ZIO.foreachDiscard(0 until size) { _ =>
               restore(worker).ensuring(signalLast).fork

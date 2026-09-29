@@ -128,7 +128,7 @@ object RetentionSpec extends ZIOSpecDefault {
             gate.succeed(()).as(Take.end)
           }
         }
-      val f: Int => UIO[Any] = a => if (blockFirst && a == 1) gate.await else ZIO.unit
+      val f: Int => UIO[Any] = a => gate.await.when(blockFirst && a == 1)
       val dispatcher = new Dispatcher[Any, Nothing, Nothing, Int](n, fetch, f, _ => ZIO.unit)
       chaser.newest = dispatcher.seedForTesting
       if (pinSeed) pin.set(chaser.newest)

@@ -82,8 +82,7 @@ private[stream] final class FailureAccumulator[E] private (
    */
   val record: Cause[E] => ZIO[Any, Nothing, Unit] =
     (cause: Cause[E]) =>
-      (if (cause.isInterruptedOnly) Exit.unit
-       else ZIO.succeed(failure.getAndUpdate(_ && cause))) *>
+      ZIO.succeed(failure.getAndUpdate(_ && cause)).unless(cause.isInterruptedOnly) *>
         errorSignal.done(Exit.unit).unit
 
   /** Completes once the run has failed, so callers can stop the workers. */

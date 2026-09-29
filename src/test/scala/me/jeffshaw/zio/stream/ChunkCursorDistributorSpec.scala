@@ -185,7 +185,7 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
           causes <- Ref.make(Vector.empty[Cause[String]])
           fetch <- scripted[String, Int](script)
           _ <- runWith(4, fetch)(
-            a => if (a % 2 == 0) ZIO.fail(s"odd-$a") else ZIO.unit,
+            a => ZIO.fail(s"odd-$a").when(a % 2 == 0),
             c => causes.update(_ :+ c)
           )
           res <- causes.get
