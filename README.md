@@ -298,11 +298,15 @@ Without them, forks of the same build settle into one of two JIT modes about 10%
 sbt release
 ```
 
-`version.sbt` holds the next version as a snapshot. `release` asks for the release version and the following snapshot version, defaulting to the current version without `-SNAPSHOT` and the next patch after it; `sbt "release with-defaults"` takes both defaults without asking. It then checks for snapshot dependencies, runs every spec for each Scala version, commits and tags the release version (`v1.0.0`), publishes signed artifacts for every Scala version, uploads and releases them to Maven Central through the Sonatype Central Portal, and commits and pushes the next snapshot version.
+`version.sbt` holds the next version as a snapshot. `release` asks for the release version and the following snapshot version, defaulting to the current version without `-SNAPSHOT` and the next patch after it; `sbt "release with-defaults"` takes both defaults without asking. It then checks for snapshot dependencies, runs every spec for each Scala version, commits and tags the release version (`v1.0.0`), signs artifacts for every Scala version, uploads them to the [Sonatype Central Portal](https://central.sonatype.com/) as a deployment, and commits the next snapshot version. The commits and the tag stay local.
+
+The Portal validates the deployment and holds it until you decide. Then either:
+
+- **publish it:** press Publish in the Portal, which releases it to Maven Central permanently, and push with `git push --follow-tags`
+- **drop it:** press Drop in the Portal, delete the tag with `git tag -d v1.0.0`, and reset the branch to the commit before the two version commits
 
 It needs:
 
 - a working tree with no uncommitted changes and no untracked files
 - `SONATYPE_USERNAME` and `SONATYPE_PASSWORD` set to a Central Portal user token
 - a PGP key that `sbt-pgp` can sign with
-- a remote tracking branch to push to

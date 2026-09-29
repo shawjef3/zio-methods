@@ -60,9 +60,10 @@ lazy val zstreamMethods = (project in file("."))
       "dev.zio" %% "zio-concurrent" % zioVersion % Test
     ),
     testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
-    // `sbt release` publishes signed artifacts for every Scala version in
-    // `crossScalaVersions`, then uploads and releases them through the Sonatype
-    // Central Portal.
+    // `sbt release` signs artifacts for every Scala version in
+    // `crossScalaVersions` and uploads them to the Sonatype Central Portal as a
+    // deployment, where they wait to be published or dropped. Its version
+    // commits and tag stay local, so a dropped deployment leaves nothing pushed.
     releaseCrossBuild := true,
     releasePublishArtifactsAction := PgpKeys.publishSigned.value,
     releaseProcess := Seq[ReleaseStep](
@@ -76,10 +77,9 @@ lazy val zstreamMethods = (project in file("."))
       commitReleaseVersion,
       tagRelease,
       publishArtifacts,
-      releaseStepCommand("sonaRelease"),
+      releaseStepCommand("sonaUpload"),
       setNextVersion,
-      commitNextVersion,
-      pushChanges
+      commitNextVersion
     )
   )
 
