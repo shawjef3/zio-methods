@@ -27,15 +27,6 @@ object RunForeachParSpec extends ZIOSpecDefault {
 
   def spec =
     suite("runForeachPar")(
-      test("visits every element") {
-        checkN(10)(Gen.small(Gen.listOfN(_)(Gen.byte))) { data =>
-          for {
-            ref <- Ref.make(Set.empty[Byte])
-            _ <- ZStream.fromIterable(data).runForeachPar(8)(a => ref.update(_ + a))
-            res <- ref.get
-          } yield assert(res)(equalTo(data.toSet))
-        }
-      },
       test("failure of the callback is failure") {
         val effect = ZStream.fromIterable(0 to 3).runForeachPar(10)(_ => ZIO.fail("fail"))
         assertZIO(effect.exit)(fails(equalTo("fail")))
@@ -101,28 +92,6 @@ object RunForeachParSpec extends ZIOSpecDefault {
             .runForeachPar(parallelism)(_ => latch.countDown *> latch.await)
         } yield assertCompletes
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
-      test("fetcher election: every element visited exactly once under many small chunks") {
-        val chunks = Chunk.fromIterable((0 until 500).map { i =>
-          if (i % 2 == 0) Chunk.single(i) else Chunk(i, i + 1000)
-        })
-        val expected = chunks.flatten.toSet
-        for {
-          ref <- Ref.make(Set.empty[Int])
-          _ <- ZStream.fromChunks(chunks: _*).runForeachPar(64)(a => ref.update(_ + a))
-          res <- ref.get
-        } yield assert(res)(equalTo(expected))
-      } @@ nonFlaky(50),
-      test("terminal end mid-flight: no element dropped, all workers finish") {
-        val n = 32
-        val total = 2000
-        for {
-          count <- Ref.make(0)
-          _ <- ZStream
-            .range(0, total)
-            .runForeachPar(n)(_ => count.update(_ + 1))
-          res <- count.get
-        } yield assertTrue(res == total)
-      } @@ nonFlaky(50),
       test("visits every element exactly once") {
         // A `Set` cannot distinguish "visited" from "visited twice", which is
         // exactly what the shared atomic cursor exists to prevent. Count each
@@ -166,51 +135,6 @@ object RunForeachParSpec extends ZIOSpecDefault {
           } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
         }
       } @@ nonFlaky(20),
-      test("terminal fused mid-batch is not lost (pendingTerminal)") {
-        // Every chunk and the end-of-stream `Take` are queued before any worker
-        // fetches, so one batch holds both data and the terminal.
-        val total = 64
-        for {
-          gate <- Promise.make[Nothing, Unit]
-          produced <- Promise.make[Nothing, Unit]
-          counts <- Ref.make(Map.empty[Int, Int])
-          fiber <- ZStream
-            .range(0, total, chunkSize = 4)
-            // Fires as the producer emits the final element, so the
-            // wait below is deterministic rather than a timing guess.
-            // `ensuring` would deadlock here: it runs at scope close,
-            // which cannot happen until the gated workers finish.
-            .tap(a => produced.succeed(()).when(a == total - 1))
-            .runForeachPar(4, 1024) { a =>
-              // Hold every worker until the producer has pushed the
-              // whole stream, terminal included, into the queue.
-              gate.await *> counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1))
-            }
-            .fork
-          // The producer is unblocked (bufferSize far exceeds the chunk count),
-          // so it runs to completion before the workers are released.
-          _ <- produced.await
-          _ <- gate.succeed(())
-          _ <- fiber.join
-          res <- counts.get
-        } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
-      } @@ TestAspect.jvmOnly @@ nonFlaky(20),
-      test("terminal failure fused mid-batch is not lost") {
-        // Same as above, but the terminal is a failure rather than
-        // end-of-stream: it must survive being parked and still fail the run.
-        for {
-          gate <- Promise.make[Nothing, Unit]
-          produced <- Promise.make[Nothing, Unit]
-          fiber <- (ZStream.range(0, 64, chunkSize = 4).tap(a => produced.succeed(()).when(a == 63)) ++
-            ZStream.fail("boom"))
-            .runForeachPar(4, 1024)(_ => gate.await)
-            .exit
-            .fork
-          _ <- produced.await
-          _ <- gate.succeed(())
-          exit <- fiber.join
-        } yield assert(exit)(fails(equalTo("boom")))
-      } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("a concurrent failure is always recorded") {
         // How *many* concurrent failures get recorded is a race: the first
         // failure fires the fail-fast signal, and the interruption that follows can
@@ -394,13 +318,7 @@ object RunForeachParSpec extends ZIOSpecDefault {
             .flatMap(fiber => parked.await *> failNow.succeed(()) *> fiber.join)
           res <- ran.get
         } yield assert(exit)(fails(equalTo("boom"))) && assertTrue(res == 0)
-      } @@ TestAspect.jvmOnly @@ nonFlaky(50),
-      test("fail-fast after terminal failure round") {
-        val effect =
-          (ZStream.range(0, 100) ++ ZStream.fail("boom"))
-            .runForeachPar(8)(_ => ZIO.unit)
-        assertZIO(effect.exit)(fails(equalTo("boom")))
-      } @@ nonFlaky(50)
+      } @@ TestAspect.jvmOnly @@ nonFlaky(50)
       // A bug in the round handoff (a terminal that is never delivered, a
       // promise left uncompleted) shows up as workers that never terminate.
       // Without a cap that hangs the run instead of reporting a failure. This

@@ -177,6 +177,57 @@ object BatchingFetchSpec extends ZIOSpecDefault {
             third <- b.effect
           } yield assertTrue(elements(second).isEmpty) && assertTrue(elements(third).isEmpty)
         }
-      )
+      ),
+      suite("through the dispatcher")(
+        test("a terminal fused mid-batch is parked, then ends the run after its data") {
+          checkAll(Gen.fromIterable(Chunk(1, 4, 16))) { n =>
+            for {
+              b <- queuedThenTerminal(n, Take.end)
+              counts <- Ref.make(Map.empty[Int, Int])
+              _ <- ChunkCursorDistributor
+                .run[Any, String, String, Int](n, b.effect, a => countVisit(counts, a), _ => ZIO.unit)
+              res <- counts.get
+            } yield assertTrue(b.parked ne null, res.size == QueuedElements, res.values.forall(_ == 1))
+          }
+        },
+        test("a failing terminal fused mid-batch is parked, then reported once after its data") {
+          checkAll(Gen.fromIterable(Chunk(1, 4, 16))) { n =>
+            for {
+              b <- queuedThenTerminal(n, Take.fail("boom"))
+              counts <- Ref.make(Map.empty[Int, Int])
+              causes <- Ref.make(Vector.empty[Cause[String]])
+              _ <- ChunkCursorDistributor
+                .run[Any, String, String, Int](n, b.effect, a => countVisit(counts, a), c => causes.update(_ :+ c))
+              res <- counts.get
+              reported <- causes.get
+            } yield assertTrue(
+              b.parked ne null,
+              res.size == QueuedElements,
+              res.values.forall(_ == 1),
+              reported.map(_.failures) == Vector(List("boom"))
+            )
+          }
+        }
+        // A terminal lost after parking leaves every worker waiting for a round
+        // that never comes, which hangs rather than fails.
+      ) @@ TestAspect.timeout(10.seconds)
     )
+
+  private val QueuedElements = 64
+
+  /**
+   * A fetcher over a queue that already holds every data chunk and then
+   * `terminal` before the first fetch, so the terminal is certain to share a
+   * batch with data. `runForeachPar`'s own producer cannot arrange that
+   * deterministically: the queue fills while the workers are already fetching.
+   */
+  private def queuedThenTerminal(n: Int, terminal: Take[String, Int]): UIO[BatchingFetch[String, Int]] =
+    for {
+      q <- Queue.bounded[Take[String, Int]](QueuedElements)
+      _ <- ZIO.foreachDiscard(0 until QueuedElements / 4)(k => q.offer(data(k * 4 until k * 4 + 4: _*)))
+      _ <- q.offer(terminal)
+    } yield BatchingFetch[String, Int](q, 1024, n)
+
+  private def countVisit(counts: Ref[Map[Int, Int]], a: Int): UIO[Unit] =
+    counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1))
 }

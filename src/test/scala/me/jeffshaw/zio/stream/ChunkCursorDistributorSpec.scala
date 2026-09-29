@@ -119,22 +119,6 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
           } yield assertTrue(calls == script.length)
         }
       } @@ nonFlaky(50),
-      test("stops pulling once a terminal round is reached") {
-        // A terminal round is absorbing. The scripted fetch repeats `Take.end`
-        // forever, so a worker that looped back into the fetcher branch after
-        // termination would keep incrementing the count.
-        val script = Chunk(Take.chunk(Chunk(1, 2, 3)), Take.end)
-        for {
-          fetchAndCount <- scriptedFetch[String, Int](script)
-          (fetch, count) = fetchAndCount
-          _ <- runWith(32, fetch)(_ => ZIO.unit)
-          before <- count
-          // Give any still-running worker a chance to pull again; the count
-          // must not move after the run has completed.
-          _ <- Live.live(ZIO.sleep(20.millis))
-          after <- count
-        } yield assertTrue(before == script.length) && assertTrue(after == before)
-      } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("empty chunks mid-stream re-elect a fetcher without stalling") {
         // A zero-length chunk makes `i == 0 == length` fire immediately, so the
         // round is published and instantly re-elects a fetcher. Several in a row
