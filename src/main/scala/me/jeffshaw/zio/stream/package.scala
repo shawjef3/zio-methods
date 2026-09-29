@@ -125,10 +125,18 @@ package object stream {
               failures <- FailureAccumulator.make[E1]
               // Producer: feed the stream's chunks into the queue as `Take`s,
               // terminated by `Take.end` on end-of-stream or `Take.failCause` on
-              // error.
+              // error. `runForeachChunk` runs the stream straight into one sink
+              // whose effect per chunk is the offer, where `runIntoQueueScoped`
+              // layers a writer channel, a per-chunk `mapOutZIO` and a `drain`
+              // over it. When chunks are small the producer is what bounds the
+              // run, so those layers are paid on the critical path. A failure,
+              // defect or interruption of the stream itself arrives here as the
+              // stream's cause, exactly as the writer would have turned it into a
+              // `Take`; interruption of this fiber by the scope never reaches the
+              // handler.
               _ <- self
-                .runIntoQueueScoped(queue)
-                .provideSomeEnvironment[R1](_.add[Scope](childScope))
+                .runForeachChunk(chunk => queue.offer(Take.chunk(chunk)))
+                .foldCauseZIO(cause => queue.offer(Take.failCause(cause)), _ => queue.offer(Take.end))
                 .forkIn(childScope)
               // Batched fetch: one round spans every chunk already buffered
               // rather than exactly one, which keeps the round boundary rare,
