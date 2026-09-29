@@ -44,7 +44,7 @@ val javaTarget = Seq(
   scalacOptions += "-release:11"
 )
 
-lazy val methods = (project in file("."))
+lazy val zstreamMethods = (project in file("."))
   .settings(javaTarget)
   .settings(
     name := "zstream-methods",
@@ -61,7 +61,7 @@ lazy val methods = (project in file("."))
   )
 
 lazy val benchmarks = (project in file("benchmarks"))
-  .dependsOn(methods)
+  .dependsOn(zstreamMethods)
   .enablePlugins(JmhPlugin)
   .settings(javaTarget)
   .settings(
