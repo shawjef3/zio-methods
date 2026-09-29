@@ -28,22 +28,25 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * How much of the measured dispatch cost is boxing, and does changing the
  * element type remove it?
  *
- * Profiling `FetchPathBenchmark` found `BoxesRunTime.boxToInteger` at 23% of CPU
- * and 1.59 MB allocated per operation, about 8 bytes per element. The cause is
- * that `f` has type `A => ZIO[R, E1, Any]`, so `A` erases to `Object` and handing
- * an `Int` to `f` must box. Every benchmark in this project uses `Chunk[Int]`, so
- * every cheap-`f` result carries that cost, while a production workload over a
- * reference type does not.
+ * Profiling `FetchPathBenchmark` over `Chunk[Int]` shows
+ * `BoxesRunTime.boxToInteger` at 23% of CPU and 1.59 MB allocated per
+ * operation, about 8 bytes per element. The cause is that `f` has type
+ * `A => ZIO[R, E1, Any]`, so `A` erases to `Object` and handing an `Int` to `f`
+ * must box. A benchmark over `Chunk[Int]` therefore charges every cheap-`f`
+ * result that cost, while a production workload over a reference type does
+ * not, so the other benchmarks use distinct `AnyRef` elements (`newref` here).
  *
- * This measures the four candidate element types against each other with an
+ * This measures the candidate element types against each other with an
  * identical no-op `f`, so the only difference is what the dispatch loop reads out
  * of the chunk.
  *
- *   - `int`: `Chunk[Int]`, what the benchmarks use today. Boxes on every read.
+ *   - `int`: `Chunk[Int]`. Boxes on every read.
  *   - `boxed`: `Chunk[Integer]`, pre-boxed and '''outside''' the -128..127
  *     `Integer` cache, so each element is a distinct object. No boxing on read,
  *     but the elements are scattered across the heap, which is what a real
  *     workload looks like.
+ *   - `newref`: `Chunk[AnyRef]` of distinct `new AnyRef`s, what the other
+ *     benchmarks use. No boxing on read, and each element a distinct object.
  *   - `shared`: `Chunk[AnyRef]` where every slot is the '''same''' object. No
  *     boxing and no allocation, but a single hot cache line, which is why this is
  *     a floor rather than a realistic figure: real elements are not all the same
@@ -52,10 +55,10 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  *     `BoxedUnit.UNIT` everywhere, so it is `shared` by another name and is
  *     included only to confirm that.
  *
- * The gap between `int` and `boxed` is what the current benchmarks are
- * overstating. The gap between `boxed` and `shared` is how much of the remainder
- * is memory locality rather than dispatch, which is why `shared` should not be
- * adopted as the standard element type even though it will score best.
+ * The gap between `int` and `boxed` is what a benchmark over `Chunk[Int]`
+ * overstates. The gap between `boxed` and `shared` is how much of the remainder
+ * is memory locality rather than dispatch, which is why `shared` is not the
+ * standard element type even though it should score best.
  */
 @State(JScope.Benchmark)
 @BenchmarkMode(Array(Mode.Throughput))

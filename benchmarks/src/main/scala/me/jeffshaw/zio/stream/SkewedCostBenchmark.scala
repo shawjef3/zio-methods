@@ -28,19 +28,18 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * Stresses the tail imbalance that `Round.MaxClaimSize` exists to bound, using an
  * `f` whose cost varies between elements.
  *
- * ==Why this benchmark exists==
+ * ==Why a no-op or uniform `f` is not enough==
  *
- * `MaxClaimSize` was raised from 16 to 256 on the strength of a +12.8% measurement
- * with a no-op `f`. The cap's stated purpose is to bound the tail: a worker
- * commits to `claimSize` elements before it can know whether it will be the round's
- * straggler, so the other workers may wait up to `(claimSize - 1) * cost(f)`. At 256
- * that exposure is sixteen times what it was.
+ * With a no-op `f`, a `MaxClaimSize` of 256 measures +12.8% over 16. The cap's
+ * purpose is to bound the tail: a worker commits to `claimSize` elements before
+ * it can know whether it will be the round's straggler, so the other workers may
+ * wait up to `(claimSize - 1) * cost(f)`. At 256 that exposure is sixteen times
+ * what it is at 16.
  *
- * The check run at the time, `CrossoverBenchmark` at `fCostIters = 5000`, used a
- * '''uniform''' `f`. Uniform cost cannot produce a straggler, because every claim
- * is equally slow, so it does not test the cap's purpose at all. `Round.scala`
- * records an earlier claim-size experiment that measured 7 to 9% slower for exactly
- * this reason, which is what makes the gap worth closing.
+ * `CrossoverBenchmark` at `fCostIters = 5000` uses a '''uniform''' `f`. Uniform
+ * cost cannot produce a straggler, because every claim is equally slow, so it
+ * does not test the cap's purpose at all. `Round.ClaimsPerWorker` documents a
+ * claim sizing that measures 7 to 9% slower for exactly this reason.
  *
  * ==The shape of the skew==
  *
@@ -53,15 +52,15 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * `costRatio` is the slow-to-fast cost ratio. A ratio of 1 is the uniform
  * control, which should show no effect from the cap at all.
  *
- * ==Calibration, which took two attempts==
+ * ==Calibration==
  *
  * The costs have to be large relative to dispatch or this measures dispatch
- * instead of the tail. A first version used `fastCostIters = 200` with a nominal
- * 50x ratio, and the skew showed up as only 1.35x against the 4.07x the element
- * distribution implies. Timing the burn loop alone explained it: 200 iterations
- * costs about 5.5ns while per-element dispatch is roughly 19ns, so `f` was 22% of
- * the work and the mean could not move much whatever the tail did. The loop was
- * not being eliminated, merely dwarfed.
+ * instead of the tail. At `fastCostIters = 200` with a nominal 50x ratio, the
+ * skew shows up as only 1.35x against the 4.07x the element distribution
+ * implies. Timing the burn loop alone explains it: 200 iterations cost about
+ * 5.5ns while per-element dispatch is roughly 19ns, so `f` is 22% of the work
+ * and the mean cannot move much whatever the tail does. The loop is not
+ * eliminated, merely dwarfed.
  *
  * Hence `fastCostIters = 20000` (about 284ns, roughly fifteen times dispatch)
  * and a 20x ratio (about 5.7us per slow element). A 256-element claim landing
@@ -72,8 +71,8 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * ==How to read it==
  *
  * Run against `MaxClaimSize = 16` and `MaxClaimSize = 256`. The prediction the cap
- * embodies is that 256 is worse here, and the size of that gap is what says
- * whether the +12.8% was bought at an unacceptable price. A configuration where
+ * embodies is that 256 is worse here, and the size of that gap is the price of
+ * the +12.8% a larger cap gains with a no-op `f`. A configuration where
  * the claim size is pinned to 1 regardless (`n` large relative to the round) is the
  * control that must not move.
  */
@@ -86,15 +85,16 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
 class SkewedCostBenchmark {
 
   /**
-   * Reduced from 200,000 because `fastCostIters` went up 100x: an operation has
-   * to stay short enough to measure.
+   * A tenth of the 200,000 that `FetchPathBenchmark` uses, because every element
+   * costs at least `fastCostIters`: an operation has to stay short enough to
+   * measure.
    */
   @Param(Array("20000"))
   var totalElements: Int = _
 
   /**
-   * 512 with fusion gives a claim size of 256 at `n = 4`, so the cap binds and the
-   * old cap of 16 differs by the full sixteen times.
+   * 512 with fusion wants a claim size of 256 at `n = 4`, so the cap binds and
+   * caps of 16 and 256 differ by the full sixteen times.
    */
   @Param(Array("512"))
   var chunkSize: Int = _
@@ -109,10 +109,10 @@ class SkewedCostBenchmark {
   /**
    * Baseline per-element work, in multiply-add iterations.
    *
-   * 20,000, not 200. Calibrated against a measured dispatch overhead of roughly
-   * 19ns per element: at 200 iterations the loop costs about 5.5ns, so `f` was
-   * only 22% of the work and the mean was dominated by dispatch rather than by
-   * `f`, which is why a nominal 50x cost ratio showed up as 1.35x. At 20,000 the
+   * Calibrated against a measured dispatch overhead of roughly 19ns per
+   * element: at 200 iterations the loop costs about 5.5ns, so `f` is only 22%
+   * of the work and the mean is dominated by dispatch rather than by `f`, which
+   * is why a nominal 50x cost ratio shows up there as 1.35x. At 20,000 the
    * fast element costs about 284ns, roughly fifteen times dispatch, so the tail
    * can actually dominate.
    */
@@ -167,12 +167,12 @@ class SkewedCostBenchmark {
    * Burns `iterations` multiply-adds seeded from `seed`, writing the result to a
    * `@volatile` field so the loop cannot be proved dead.
    *
-   * The seed has to vary per call. An earlier version started from a literal, and
-   * the JIT evidently collapsed the loop: a nominal 50x cost ratio produced a
-   * measured mean multiplier of 1.24x against the 4.07x the element distribution
-   * implies, so the "skewed" configuration was barely skewed and the benchmark was
-   * not measuring what it claimed. `CrossoverBenchmark` seeds from the element
-   * value for the same reason, and its sweep scales as expected.
+   * The seed has to vary per call. Started from a literal, the loop is
+   * evidently collapsed by the JIT: a nominal 50x cost ratio then measures a
+   * mean multiplier of 1.24x against the 4.07x the element distribution
+   * implies, so the "skewed" configuration is barely skewed.
+   * `CrossoverBenchmark` seeds from the element's identity hash for the same
+   * reason, and its sweep scales as expected.
    */
   private def burn(seed: Long, iterations: Int): Unit = {
     var acc = seed

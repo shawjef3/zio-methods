@@ -60,8 +60,8 @@ class ChunkShapeBenchmark {
   var totalElements: Int = _
 
   /**
-   * The chunk size the source emits. 1 is the pathological callback-driven
-   * case the README names; 512 is a JDBC-cursor-shaped source it says to leave
+   * The chunk size the source emits. 1 is the one-element-per-callback case
+   * the README names; 512 is a JDBC-cursor-shaped source it says to leave
    * alone; 64 sits between them.
    */
   @Param(Array("1", "64", "512"))

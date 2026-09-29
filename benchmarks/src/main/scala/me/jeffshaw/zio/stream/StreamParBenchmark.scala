@@ -41,8 +41,8 @@ class StreamParBenchmark {
   // `AnyRef`, not `Int`: `f` is `A => ZIO[R, E1, Any]`, so `A` erases to `Object`
   // and an `Int` element boxes on every read. `ElementTypeBenchmark` measures that
   // at about 11% of throughput, a cost no production workload over a reference
-  // type pays. The `BigDecimal` work is unchanged; only the seed differs, so the
-  // scores here are not comparable to the README table measured before this.
+  // type pays. The `BigDecimal` work is seeded from each element's identity
+  // hash, so these scores are not comparable to ones taken over `Int` elements.
   var zioChunks: IndexedSeq[Chunk[AnyRef]] = _
 
   @Setup
@@ -180,11 +180,11 @@ class StreamParBenchmark {
   // at 0 / 200 / 2000 / 20000), so even the default 200 already makes the
   // producer the limiting stage rather than the workers.
   //
-  // What this does NOT reproduce is the queue-less design's collapse, which
+  // What this does NOT reproduce is the collapse of a queue-less design, which
   // needs a pull that *suspends*; see the blocking-upstream benchmark below.
   // A slow on-CPU pull and a parked one both keep the fetcher from running `f`,
-  // but only the parked one costs a scheduler wake to resume, and only it was
-  // measured to sink the queue-less shape. Keeping both benchmarks is what
+  // but only the parked one costs a scheduler wake to resume, and only it
+  // measurably sinks the queue-less shape. Keeping both benchmarks is what
   // separates "producer is slow" from "producer parks".
   // ---------------------------------------------------------------------------
 
@@ -231,11 +231,11 @@ class StreamParBenchmark {
   // fiber and queue pay for themselves, by keeping up to `bufferSize` of work in
   // flight across the wait.
   //
-  // A queue-less design in which the fetcher is itself a worker (pulling the
-  // stream directly; measured and rejected) loses ~44% throughput here: while
-  // that worker waits on the pull, nothing is queued behind it, and once the
-  // current chunk drains the remaining workers idle until the pull returns.
-  // Keep this benchmark as the guard against reintroducing that shape.
+  // A queue-less design in which the fetcher is itself a worker, pulling the
+  // stream directly, loses ~44% throughput here: while that worker waits on
+  // the pull, nothing is queued behind it, and once the current chunk drains
+  // the remaining workers idle until the pull returns. This benchmark is the
+  // guard against that shape.
   //
   // The source is a bounded `Queue` fed by a forked producer, so `queue.take`
   // genuinely suspends the fiber rather than spinning.
@@ -276,10 +276,10 @@ class StreamParBenchmark {
 }
 
 // The two upstream parameters live in their own states, passed only to the
-// benchmark that reads each. On `StreamParBenchmark` itself they multiplied
-// every method in the class by 3 x 3 combinations, so a run without `-p`
-// measured each of the nine methods that read neither parameter nine times.
-// The benchmark names, and the `-p` names, are unchanged.
+// benchmark that reads each. On `StreamParBenchmark` itself they would
+// multiply every method in the class by 3 x 3 combinations, so a run without
+// `-p` would measure each of the nine methods that read neither parameter nine
+// times.
 
 @State(JScope.Benchmark)
 class StreamParSlowUpstreamParams {

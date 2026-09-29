@@ -354,7 +354,7 @@ object RetentionSpec extends ZIOSpecDefault {
         } yield assertTrue(batched <= par + 2 * ChunkSize, few <= par + 2 * ChunkSize, unbatched <= par + 2 * ChunkSize)
       } @@ TestAspect.withLiveClock @@ TestAspect.timeout(120.seconds),
       test("an idle stream does not keep the drained round") {
-        // See `Dispatcher.release`. The baseline is `runForeach`, which keeps
+        // See `Dispatcher.releaseChunk`. The baseline is `runForeach`, which keeps
         // the stream machinery's own last chunk; that one is not ours to
         // release.
         for {

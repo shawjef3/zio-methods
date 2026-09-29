@@ -29,8 +29,8 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * incidentally.
  *
  * `fetch` runs once per round, not once per element, so its cost is visible
- * only when rounds are short relative to the work in them. The existing
- * benchmarks both hide it: `StreamParBenchmark` uses 50-element chunks but a
+ * only when rounds are short relative to the work in them. Two other
+ * benchmarks hide it: `StreamParBenchmark` uses 50-element chunks but a
  * `bufferSize` large enough that fusion produces long rounds, and
  * `RealisticParBenchmark` has a 5ms `f` that swamps everything.
  *
@@ -39,10 +39,12 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * which is exactly the ratio a change to `fetch` moves. `f` is a no-op so
  * nothing else competes.
  *
- * The empty-queue case matters most: `takeBetween(1, max)` issues a
- * `takeUpTo(max)` that returns nothing and is discarded, then falls back to a
- * real `take`. Workers outrun an in-memory producer easily, so the steady state
- * here is an empty queue and that wasted poll on every round.
+ * A fetch takes one of two paths. `takeBetween(1, max)` first issues a
+ * `takeUpTo(max)`; on an empty queue that returns nothing, is discarded, and
+ * falls back to a real `take`. This benchmark exercises both, but mostly the
+ * populated one: the producer refills the queue while the workers drain a
+ * fused round, so with a no-op `f` and the default `bufferSize`, 52-96% of
+ * fetches find two or more chunks queued (see `BatchingFetch`).
  */
 @State(JScope.Benchmark)
 @BenchmarkMode(Array(Mode.Throughput))
@@ -58,8 +60,8 @@ class FetchPathBenchmark {
 
   /**
    * Rounds per run scale as `totalElements / chunkSize`, so the small sizes are
-   * where per-round cost shows up. 1 is the pathological case a callback-driven
-   * source produces.
+   * where per-round cost shows up. 1 is the one-element-per-callback case a
+   * callback-driven source produces.
    */
   @Param(Array("1", "8", "64", "512"))
   var chunkSize: Int = _

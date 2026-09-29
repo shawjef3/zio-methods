@@ -26,13 +26,13 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
 
 /**
  * Isolates the per-run cost of starting and stopping the worker pool, which is
- * what `WorkerPool` changed and which no existing benchmark measures.
+ * what `WorkerPool` is built to cut and which no other benchmark measures.
  *
- * The cost being targeted is `O(n)` per *run*, not per element: the previous
- * implementation (`ZIO.foreachParDiscard(1 to n).withParallelism(n)`, resolving
- * to ZIO's `foreachParUnboundedDiscard`) retained a `Chunk` of all `n`
- * `Fiber.Runtime`s for the whole run, wrapped each worker in
- * `applyOnExitWith`, and walked every fiber calling `inheritAll` at shutdown.
+ * The cost being targeted is `O(n)` per *run*, not per element:
+ * `ZIO.foreachParDiscard(1 to n).withParallelism(n)`, resolving to ZIO's
+ * `foreachParUnboundedDiscard`, retains a `Chunk` of all `n` `Fiber.Runtime`s
+ * for the whole run, wraps each worker in `applyOnExitWith`, and walks every
+ * fiber calling `inheritAll` at shutdown. `WorkerPool` does none of these.
  *
  * To make that visible, the *stream* is kept deliberately tiny while `n` grows.
  * Every other benchmark does the opposite (lots of elements, modest `n`), which

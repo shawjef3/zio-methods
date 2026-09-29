@@ -96,7 +96,7 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
  *
  * One instance per run, built by [[Dispatcher.run]] and shared by every worker.
  * Holding `n`, `fetch`, `f` and `onError` as fields keeps them off the loop's
- * argument lists: as nested defs they were lifted into every call, including
+ * argument lists: as nested defs they would be lifted into every call, including
  * the per-element ones. They are immutable and only read, so the sharing needs
  * no synchronization. The mutable state of a run lives in [[Round]]; the only
  * mutable state here is the seed handoff, touched once per worker at startup,
@@ -207,7 +207,7 @@ private[stream] final class Dispatcher[R, E, A](
    * on the producer for as long as the stream is idle, and all that time the
    * drained round is reachable from the fetcher's continuation and from
    * [[latest]]. Released only after the publish, its chunk, a fusion of up to
-   * `bufferSize` of the stream's chunks, stayed alive until the next chunk
+   * `bufferSize` of the stream's chunks, would stay alive until the next chunk
    * arrived: 400 to 1600 elements after a 16-chunk burst of 100, against the
    * 100 of the chunk the stream machinery itself keeps.
    *
@@ -277,7 +277,7 @@ private[stream] final class Dispatcher[R, E, A](
    * that has not returned is reachable for as long as it runs. Capturing `chunk`
    * would keep the whole round's chunk, a fusion of up to `bufferSize` of the
    * stream's chunks, alive behind every hung or slow callback, long after
-   * [[releaseChunk]]: with 64 workers, one hung callback kept 1697 elements reachable
+   * [[releaseChunk]]: with 64 workers, one hung callback would keep 1697 elements reachable
    * against 99 for `mapZIOParUnordered`. So mid-claim it captures a copy of the
    * rest of the claim, at most `Round.MaxClaimSize - 1` elements. A chunk that
    * small is kept as is, so a claim copies at most once however often its `f`
@@ -299,8 +299,8 @@ private[stream] final class Dispatcher[R, E, A](
    * `chunk ne null` keeps a released round from re-electing: a worker that
    * re-enters `loop` on one goes to the await branch instead. For a batched
    * round the CAS would refuse it too, since `releaseChunk` runs only once the winner
-   * has been elected, so the guard is belt and braces there and the sole
-   * protection at claim size 1.
+   * has been elected, so the guard is redundant there and the sole protection
+   * at claim size 1.
    */
   private def isFetcher(round: Round[A], chunk: Chunk[A], i: Int, length: Int, claimSize: Int): Boolean =
     (chunk ne null) && (if (claimSize == 1) i == length else round.fetcherElected.compareAndSet(false, true))
@@ -347,11 +347,11 @@ private[stream] final class Dispatcher[R, E, A](
    * the JVM stack. A failure ends the worker's loop, abandoning the rest of the
    * claim, which is what fail-fast means here.
    *
-   * This is not the `ZIO.whileLoop` version that was implemented and reverted
-   * (it cut allocation by 23-38% while costing ~30% throughput): that one ran
-   * every element through the interpreter. Hoisting the per-element closure
-   * alone also measured as a no-op; what this removes for an `Exit` result is
-   * the closure, the recursion and the interpreter round trip together.
+   * Running every element through the interpreter instead, as a
+   * `ZIO.whileLoop` does, cuts allocation by 23-38% but costs ~30% throughput.
+   * Hoisting the per-element closure alone measures as a no-op; what this
+   * removes for an `Exit` result is the closure and the interpreter round trip
+   * together.
    */
   private def loop(round: Round[A]): ZIO[R, Nothing, Unit] = {
     var budget = Dispatcher.YieldEvery
@@ -436,10 +436,10 @@ private[stream] object Dispatcher {
    * round. Returning an effect every so often restores both, and costs one
    * `suspendSucceed` node per `YieldEvery` elements.
    *
-   * This used to bound JVM recursion as well, back when an `Exit` result ran
-   * its continuation inline through `Exit#foldCauseZIO`: a single
-   * 200,000-element chunk with a no-op `f` overflowed a 512KB stack. `loop` no
-   * longer recurses, and `StackSafetySpec` still covers that case.
+   * It is not what keeps the JVM stack bounded: `loop` does not recurse. Were
+   * an `Exit` result to run its continuation inline through
+   * `Exit#foldCauseZIO`, a single 200,000-element chunk with a no-op `f` would
+   * overflow a 512KB stack; `StackSafetySpec` covers that case.
    */
   private final val YieldEvery = 512
 

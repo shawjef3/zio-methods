@@ -25,8 +25,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * Runs `n` copies of one effect concurrently, completing when the last of them
  * finishes.
  *
- * This replaces `ZIO.foreachParDiscard(1 to n)(...).withParallelism(n)` in
- * [[Dispatcher.run]], and is derived from the implementation that call
+ * It does the job of `ZIO.foreachParDiscard(1 to n)(...).withParallelism(n)`
+ * for [[Dispatcher.run]], and is derived from the implementation that call
  * resolves to: ZIO 2.1.26's private `ZIO.foreachParUnboundedDiscard`, selected
  * because `parallelism == size`.
  *
@@ -46,50 +46,44 @@ import java.util.concurrent.atomic.AtomicInteger
  * interrupting this fiber, which is what `runForeachPar` does when it closes
  * the scope this runs in, interrupts the workers with it. No collection has to
  * be retained, nothing needs interrupting by hand, and there is no shutdown
- * walk. `transplant`/`Grafter` goes with it, since its role was to give the
- * daemon fibers' ''children'' a scope to be transferred to on exit, which a
- * normally-forked worker's children already have.
+ * walk. Nor is there a `transplant`/`Grafter`, whose role in the library
+ * version is to give the daemon fibers' ''children'' a scope to be transferred
+ * to on exit, which a normally-forked worker's children already have.
  *
- * That the interruption really is structural is a test rather than an argument:
  * `RunForeachParSpec`'s "interrupts pending tasks when one of the tasks fails"
- * counts interruptions, and sees 0 instead of 2 if the workers are forked as
- * daemons without the retained collection.
+ * guards the structural interruption: it counts interruptions, and sees 0
+ * instead of 2 if the workers are forked as daemons without the retained
+ * collection.
  *
- * ==How this was arrived at==
+ * ==Starting the workers==
  *
- * Four hand-written fork loops failed the suite before this. What worked was
- * copying `foreachParUnboundedDiscard` verbatim into `package zio`, where its
- * `private[zio]` dependencies are reachable, confirming the copy passed the
- * suite, then removing one piece at a time and re-running.
- *
- * Those failures were once blamed on `forkDaemon` breaking fetcher election on
- * the shared seed round. That cannot be the mechanism: the election is correct
- * in any arrival order (see the seed in [[Dispatcher]]). A more likely cause is
- * that `Dispatcher.loop` claims from the cursor when it is called, so a loop
- * that built the worker effect once and forked it `n` times made every worker
- * the seed's fetcher. `worker` is by-name here, and [[Dispatcher.run]] passes a
- * suspended effect, so neither can happen now. The fork mode matters only for
- * interruption, as above.
+ * The fork mode matters only for interruption, as above; fetcher election on
+ * the shared seed round is correct in any arrival order (see the seed in
+ * [[Dispatcher]]). What does matter is that each worker gets its own effect:
+ * `Dispatcher.loop` claims from the cursor when it is called, so building the
+ * worker effect once and forking it `n` times would make every worker the
+ * seed's fetcher. `worker` is by-name here, and [[Dispatcher.run]] passes a
+ * suspended effect, so neither can happen.
  *
  * ==What it is worth==
  *
- * Retention, not throughput. Measured against the previous implementation with
+ * Retention, not throughput. Against `foreachParDiscard` on
  * `WorkerStartupBenchmark`, whose deliberately tiny stream leaves a run
- * dominated by pool setup and teardown: every point from `n = 4` to
- * `n = 16384` had overlapping error bars, and the one apparent separation
- * (-14% at `n = 16384` over 10,000 elements) fell to -4.6% when re-measured
- * alone at `-f 5 -wi 10 -i 10`, with the baseline side then showing a fork that
- * never reached steady state. Forking `n` fibers dominates either way; not
- * retaining them afterwards does not make the forking faster.
+ * dominated by pool setup and teardown, every point from `n = 4` to
+ * `n = 16384` has overlapping error bars. The closest to a separation,
+ * `n = 16384` over 10,000 elements, measures -4.6% alone at
+ * `-f 5 -wi 10 -i 10`, with a baseline fork that never reaches steady state.
+ * Forking `n` fibers dominates either way; not retaining them afterwards does
+ * not make the forking faster.
  *
  * So this exists to stop holding ~40,960 fiber objects for the length of a run,
  * and that is not something the benchmarks measure. `RetentionSpec` covers
- * element and round retention, not fibers, so nothing currently guards it.
+ * element and round retention, not fibers, so no test guards it.
  *
- * ==Reduction to public API==
+ * ==Public API only==
  *
- * The copy has since been reduced to public API and moved here. Two
- * substitutions were needed, both off the per-element path:
+ * It uses only public API. Two substitutions stand in for the library
+ * version's calls, both off the per-element path:
  *
  *   - `Promise.make` in place of `Promise.unsafe.make`, which is public but
  *     would need an `Unsafe` in scope. This is one effect per run.

@@ -28,8 +28,7 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * Sweeps `bufferSize`, the combinator's only tuning knob besides `n`, which
  * every other benchmark leaves at its default of 16.
  *
- * Two README claims are on trial here, both from "Sizing `bufferSize` and
- * chunks":
+ * This tests two README claims, both from "Sizing `bufferSize` and chunks":
  *
  *   1. "going from one round per worker-pass to four matters and from forty to
  *      a hundred and sixty does not", i.e. the return on `bufferSize` is steeply

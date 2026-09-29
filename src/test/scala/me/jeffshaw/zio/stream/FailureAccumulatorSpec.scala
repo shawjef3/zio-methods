@@ -25,7 +25,7 @@ import scala.concurrent.ExecutionContext
  * Pins the failure protocol directly, as calls on one accumulator.
  *
  * `RunForeachParSpec` covers the same behavior end to end, through a real run
- * with racing workers; those tests stay. What they cannot show in isolation is
+ * with racing workers. What those tests cannot show in isolation is
  * the case the protocol turns on: a run that failed while recording no cause at
  * all. That is asserted here.
  */

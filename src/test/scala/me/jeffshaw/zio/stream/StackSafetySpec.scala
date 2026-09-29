@@ -28,11 +28,12 @@ import zio.test._
  *
  * `Dispatcher.loop` handles an `f` that returns an already-completed `Exit`
  * (such as `_ => Exit.unit`) inline, without going back to the ZIO interpreter.
- * If that path ever recursed rather than looping, as it once did through
- * `Exit#foldCauseZIO`, its JVM stack depth would be the length of a round,
- * which neither `Round.MaxClaimSize` nor fusion bounds. Other synchronous effects,
- * `ZIO.succeed` among them, are evaluated by the interpreter's own loop and do
- * not recurse, so only an `Exit` result exercises this.
+ * If that path recursed rather than looping, for example by running each
+ * continuation through `Exit#foldCauseZIO`, its JVM stack depth would be the
+ * length of a round, which neither `Round.MaxClaimSize` nor fusion bounds.
+ * Other synchronous effects, `ZIO.succeed` among them, are evaluated by the
+ * interpreter's own loop and do not recurse, so only an `Exit` result
+ * exercises this.
  *
  * Every run here happens on a dedicated [[SmallStackRuntime]], whose threads all
  * have [[SmallStackBytes]] of stack. Starting the run from a small-stack thread
@@ -50,16 +51,16 @@ object StackSafetySpec extends ZIOSpecDefault {
    *
    * 1MB sits between measurements taken on JDK 25. The flat loop passes every
    * test here with 128KB, so it has 8x headroom and a failure means real
-   * recursion. A loop that recursed once per element but trampolined every 512
-   * elements (commit e4df319) needed more than 384KB and passed with 512KB, so
-   * recursion bounded by a small constant still passes with room to spare. The
-   * same loop with the trampoline disabled overflowed in every test at 256KB,
-   * 512KB and 1MB. At 2MB the two 200,000-element single-chunk tests still
-   * overflowed but the other two, whose rounds are shorter, did not, and even
-   * at 1MB the many-chunks test caught it in only two runs of three until it
-   * was given a deeper buffer. So much above 1MB the guard would weaken, and
-   * much below it the guard would start to reject bounded recursion that is
-   * harmless.
+   * recursion. A loop that recurses once per element but trampolines every 512
+   * elements needs more than 384KB and passes with 512KB, so recursion bounded
+   * by a small constant still passes with room to spare. The same loop with
+   * the trampoline disabled overflows in every test at 256KB, 512KB and 1MB. At
+   * 2MB the two 200,000-element single-chunk tests still overflow but the other
+   * two, whose rounds are shorter, do not, and even at 1MB the many-chunks test
+   * needs its deeper buffer to catch it reliably: with the default buffer it
+   * catches it in only two runs of three. So much above 1MB the guard would
+   * weaken, and much below it the guard would start to reject bounded
+   * recursion that is harmless.
    */
   private val SmallStackBytes = 1024L * 1024
 

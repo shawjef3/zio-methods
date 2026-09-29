@@ -27,8 +27,8 @@ import java.util.concurrent.atomic.AtomicReference
  * Three things that have to agree are held together here, because they are one
  * mechanism: whether the run failed, why it failed, and when the other workers
  * should stop. The signal decides ''whether''; the accumulated cause holds
- * ''why''. They can legitimately disagree, which is the whole reason this is a
- * type rather than three bindings:
+ * ''why''. They can legitimately disagree, which is why this is a type rather
+ * than three bindings:
  *
  *   - An interruption-only cause fires the signal but is deliberately '''not'''
  *     recorded, matching `ZChannel#mapOutZIOParUnordered`. Interruption is

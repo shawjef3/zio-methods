@@ -44,7 +44,7 @@ private[stream] final class Round[A](
   val isTerminal: Boolean,
   /**
    * How many contiguous elements one claim reserves. See [[Round.claimSizeFor]];
-   * a claim size of `1` reproduces the one-element-per-atomic behavior exactly.
+   * a claim size of `1` claims exactly one element per atomic operation.
    */
   val claimSize: Int,
   /**
@@ -54,7 +54,7 @@ private[stream] final class Round[A](
    *
    * `null` for a round of single-element claims, where `i == length` elects for free, so the
    * flag is neither allocated nor read. That keeps a slow-`f` run, where every
-   * round claims one element at a time, allocating exactly what it did before batching existed.
+   * round claims one element at a time, from paying any allocation for batching.
    */
   val fetcherElected: AtomicBoolean
 )
@@ -70,10 +70,9 @@ private[stream] object Round {
    * for the other workers to save `(claimSize - 1) / claimSize` of the cursor's
    * atomic operations. The cap bounds that tail.
    *
-   * 64 rather than 16, which is where this was originally set. At 16 the cap was
-   * binding hard in the regime it matters most: at 512-element chunks with
-   * `n = 4`, a fused round of sixteen chunks wants a claim size of `8192 / 32 = 256`,
-   * so 16 discarded most of the available amortization.
+   * A cap of 16 binds hard in the regime it matters most: at 512-element chunks
+   * with `n = 4`, a fused round of sixteen chunks wants a claim size of
+   * `8192 / 32 = 256`, so 16 discards most of the available amortization.
    *
    * Swept against two benchmarks, because one alone is misleading in each
    * direction. `FetchPathBenchmark` at 512-element chunks with `n = 4` is the
@@ -89,31 +88,32 @@ private[stream] object Round {
    * | 256 | 739.14 ± 33.06 (+14.3%) | 44.53 ± 0.71 ('''-11.4%''') |
    *
    * 64 improves '''both''' columns, so it is not a compromise between them. The
-   * regression appears only between 64 and 256, which makes this a cliff rather
-   * than a gradual trade, and 64 sits below it.
+   * loss appears only between 64 and 256, which makes this a cliff rather than
+   * a gradual trade, and 64 sits below it.
    *
    * ==A cap in elements cannot bound a tail measured in work==
    *
-   * This value was briefly 256, on a `FetchPathBenchmark` measurement alone. The
-   * check run at the time used `CrossoverBenchmark` at `fCostIters = 5000`, which
-   * is '''uniform''' cost: every claim is equally expensive, so no worker can be
-   * a straggler and the cap's purpose goes untested. With clustered costs, 256
-   * measured -13.6% (51.34 ± 1.63 to 44.36 ± 0.76, fork spreads 1.2% and 0.7%),
-   * with all three controls flat.
+   * A uniform-cost benchmark cannot test this cap. `FetchPathBenchmark` favors
+   * 256, and `CrossoverBenchmark` at `fCostIters = 5000` is '''uniform''' cost:
+   * every claim is equally expensive, so no worker can be a straggler and the
+   * cap's purpose goes untested. With clustered costs, 256 measures -13.6%
+   * against 16 (44.36 ± 0.76 against 51.34 ± 1.63, fork spreads 0.7% and 1.2%),
+   * with all three controls (two uniform, one where the claim size pins to 1)
+   * flat.
    *
-   * The underlying reason is worth keeping in view. [[ClaimsPerWorker]] bounds
-   * the tail at `1 / ClaimsPerWorker` of the round '''in units of work''',
-   * whatever `f` costs, because `length / (n * ClaimsPerWorker)` shrinks the
-   * claim size exactly when a round holds few elements per worker. That bound is
-   * independent of `cost(f)`, which is what makes it sound. This cap is an
-   * absolute element count, so once it binds it silently replaces that guarantee
-   * with "at most `MaxClaimSize` elements, however long those take". At 256
-   * clustered slow elements that was roughly 1.5ms serialized behind one worker.
+   * [[ClaimsPerWorker]] bounds the tail at `1 / ClaimsPerWorker` of the round
+   * '''in units of work''', whatever `f` costs, because
+   * `length / (n * ClaimsPerWorker)` shrinks the claim size exactly when a round
+   * holds few elements per worker. That bound is independent of `cost(f)`,
+   * which is what makes it sound. This cap is an absolute element count, so
+   * once it binds it silently replaces that guarantee with "at most
+   * `MaxClaimSize` elements, however long those take". At 256 clustered slow
+   * elements that is roughly 1.5ms serialized behind one worker.
    *
    * So the cap is a backstop for rounds large enough that even a work-proportional
    * bound is a lot of wall-clock, and it has to stay small enough that a claim of
-   * pathological elements is still survivable. Raising it further needs the skew
-   * benchmark, not just the uniform one.
+   * the slowest elements is still survivable. A larger value has to be measured
+   * on the skew benchmark, not just the uniform one.
    */
   private[stream] final val MaxClaimSize = 64
 
@@ -123,14 +123,13 @@ private[stream] object Round {
    * `c` claims apiece, a worker that draws one oversized claim is at most
    * `1 / c` of the round behind, whatever `f` costs.
    *
-   * Sizing claims so that each worker gets exactly one is what an earlier
-   * revision did, and it measured 7-9% *slower* at `n` in the thousands with a
-   * 5ms `f`: one claim per worker means the round ends when the slowest single
-   * claim ends, so a 16-element claim serialized 80ms behind the others.
-   * Requiring several claims apiece keeps the same amortization for a cheap
-   * `f`, where the claim size is capped by `MaxClaimSize` long before this bites,
-   * while restoring fine-grained balance once elements per worker is the
-   * binding constraint.
+   * Sizing claims so that each worker gets exactly one measures 7-9% *slower*
+   * at `n` in the thousands with a 5ms `f`: one claim per worker means the
+   * round ends when the slowest single claim ends, so a 16-element claim
+   * serializes 80ms behind the others. Requiring several claims apiece keeps
+   * the same amortization for a cheap `f`, where the claim size is capped by
+   * `MaxClaimSize` long before this bites, while keeping fine-grained balance
+   * once elements per worker is the binding constraint.
    */
   private final val ClaimsPerWorker = 8
 

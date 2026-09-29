@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit
 import me.jeffshaw.zio.stream.BenchmarkUtil._
 
 /**
- * Isolates the cost of the round-publish wake, which no existing benchmark
+ * Isolates the cost of the round-publish wake, which no other benchmark
  * separates from everything else `n` affects.
  *
  * ==What is being tested==
@@ -49,9 +49,9 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * throughput should fall roughly linearly in `n`; if it is not, the curve should
  * flatten instead.
  *
- * `elementsPerRound` is the second axis, and it is what makes this diagnostic
- * rather than merely suggestive. It changes how many workers a round can occupy
- * without changing `n`:
+ * `chunkSize` is the second axis, and it is what separates the wake cost from
+ * other costs of `n`. It changes how many workers a round can occupy without
+ * changing `n`:
  *
  *   - `chunkSize = 16` fuses to short rounds, so at `n = 4096` nearly every
  *     worker wakes for nothing. Maximum waste.
@@ -61,10 +61,10 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * The prediction that distinguishes the wake herd from generic fiber overhead:
  * the penalty for raising `n` should be '''much steeper at small chunk sizes'''.
  * If instead the two chunk sizes degrade alike, the cost is something about
- * having many fibers rather than about waking them per round, and ideas 1a/1b
- * (which only reduce wake cost) would not repay their complexity.
+ * having many fibers rather than about waking them per round, and designs that
+ * only reduce wake cost would not repay their complexity.
  *
- * `f` is a no-op so nothing competes with the coordination being measured.
+ * At `fCost = noop`, nothing competes with the coordination being measured.
  */
 @State(JScope.Benchmark)
 @BenchmarkMode(Array(Mode.Throughput))
@@ -117,7 +117,8 @@ class WakeHerdBenchmark {
    *     rows rather than alone.
    *   - `park200us`: `ZIO.sleep`, which yields the core. This is the shape the
    *     README's target workload has (a database round trip, an HTTP call), and
-   *     the one that decides whether ideas 1a/1b/1c repay their complexity.
+   *     the one that decides whether designs that reduce wake cost repay their
+   *     complexity.
    *     Scaled down from the README's 5 ms so a run finishes.
    */
   @Param(Array("noop", "spin1us", "spin10us", "park200us"))

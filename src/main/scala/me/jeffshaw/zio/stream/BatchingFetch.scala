@@ -48,43 +48,40 @@ import java.util.concurrent.atomic.AtomicReference
  * its per-batch continuation: a fetch costs the parked-terminal read, the
  * `takeBetween` and its one `flatMap` node, and the fusing.
  *
- * Fusing is the common case, not an edge case. It is tempting to read
- * "`takeBetween` suspends only when the queue is empty" as implying that
- * workers outrun an in-memory producer and each fetch therefore sees one chunk;
- * measurement says otherwise. Instrumenting the batch size a fetch observes,
- * with a no-op `f` over `ZStream.fromChunks` and the default `bufferSize` of
- * 16, 52-96% of fetches saw two or more chunks, averaging 3-14. The producer
- * refills the queue while the workers drain a multi-chunk round, so the steady
- * state is a populated queue even when `f` is free.
+ * Fusing is the common case, not an edge case. "`takeBetween` suspends only
+ * when the queue is empty" does not imply that workers outrun an in-memory
+ * producer so that each fetch sees one chunk. With a no-op `f` over
+ * `ZStream.fromChunks` and the default `bufferSize` of 16, 52-96% of fetches
+ * see two or more chunks, averaging 3-14. The producer refills the queue while
+ * the workers drain a multi-chunk round, so the steady state is a populated
+ * queue even when `f` is free.
  *
- * [[fuse]] is therefore on the hot path, and its `flatMap` is not an accident.
+ * [[fuse]] is therefore on the hot path, and it uses `flatMap` deliberately.
  * `ChunkLike.flatMap` collects the source chunks, allocates one
  * `Array.ofDim(total)`, and fills it with one bulk `System.arraycopy` per
  * chunk, yielding the flat array that `Dispatcher.loop`'s per-element
- * `chunk(i)` wants. Two alternatives were implemented and measured against
- * `FetchPathBenchmark`, and both lost badly enough to revert:
+ * `chunk(i)` wants. Against `FetchPathBenchmark`, both alternatives measure
+ * much slower:
  *
  *   - a hand-rolled `ChunkBuilder` sized in one pass: -58% at 512-element
  *     chunks, because it appends through the builder instead of bulk-copying;
  *   - `++`, which copies nothing and links the chunks into a `Chunk.Concat`
  *     tree: -47% at 512-element chunks, and still -8 to -13% at one element per
- *     chunk where there is nearly nothing to copy. That last point is the
- *     informative one: it isolates the loss to `Concat.apply`'s per-element
- *     tree descent replacing a flat array read, not to the copy.
+ *     chunk where there is nearly nothing to copy. That last point isolates the
+ *     loss to `Concat.apply`'s per-element tree descent replacing a flat array
+ *     read, not to the copy.
  *
- * A third attempt went the other way: skip fusing when the head chunk is
- * already large enough to be a round on its own (`n * 8` elements), on the
- * theory that the copy then buys nothing. It lost by 26-61% wherever it
- * engaged, worst at `n = 64` with 512-element chunks. That is the informative
- * direction: a lone 512-element chunk gives 64 workers eight elements each, so
- * the round boundary (a promise completion and up to `n - 1` worker wakes)
- * arrives every eight elements per worker, and fusing sixteen chunks makes it
- * sixteen times rarer. The losses scale with `n`, which is the wake-herd
- * signature.
+ * Skipping the fuse when the head chunk is already large enough to be a round
+ * on its own (`n * 8` elements) also measures slower, by 26-61% wherever it
+ * engages, worst at `n = 64` with 512-element chunks. A lone 512-element chunk
+ * gives 64 workers eight elements each, so the round boundary (a promise
+ * completion and up to `n - 1` worker wakes) arrives every eight elements per
+ * worker, and fusing sixteen chunks makes it sixteen times rarer. The losses
+ * scale with `n`, which is the wake-herd signature.
  *
  * So the copy is cheap and the round boundary is expensive, and all three
- * results agree on that ordering. Any future attempt here needs to keep the
- * fused round a flat chunk, and to fuse at least as eagerly as this does.
+ * measurements agree on that ordering. The fused round must stay a flat chunk,
+ * and fuse at least as eagerly as this does.
  */
 private[stream] final class BatchingFetch[E, A] private (
   queue: Queue[Take[E, A]],
@@ -132,13 +129,13 @@ private[stream] final class BatchingFetch[E, A] private (
    * of any real size the first take already clears the target and the drain is
    * skipped.
    *
-   * Measured on `FetchPathBenchmark` at one element per chunk, the regime this
-   * targets, at `-f 5 -wi 10 -i 10`: +4.1% at `n = 4` (4.211 ± 0.069 to 4.382 ±
-   * 0.057 ops/s) and +9.4% at `n = 64` (2.789 ± 0.044 to 3.052 ± 0.068), both
-   * separated, with fork spreads under 10%. The gain grows with `n` because the
-   * target does: a 16-chunk batch holds 16 elements against a target of 512 at
-   * `n = 64`, versus 32 at `n = 4`. At 64- and 512-element chunks every point
-   * was flat, the control this needed to pass.
+   * On `FetchPathBenchmark` at one element per chunk, the regime this targets,
+   * at `-f 5 -wi 10 -i 10`, the drain measures +4.1% at `n = 4` (4.382 ± 0.057
+   * against 4.211 ± 0.069 ops/s without it) and +9.4% at `n = 64` (3.052 ±
+   * 0.068 against 2.789 ± 0.044), both separated, with fork spreads under 10%.
+   * The gain grows with `n` because the target does: a 16-chunk batch holds 16
+   * elements against a target of 512 at `n = 64`, versus 32 at `n = 4`. At 64-
+   * and 512-element chunks every point is flat.
    */
   private[stream] def fetch(implicit trace: Trace): ZIO[Any, Nothing, Take[E, A]] = {
     // Built once, with `fetch`, rather than as a fresh closure every fetch.

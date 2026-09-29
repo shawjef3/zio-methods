@@ -54,17 +54,17 @@ class CrossoverBenchmark {
   /**
    * Per-element work in the callback, in multiply-add iterations.
    *
-   * 10 and 50 are dropped from the original sweep: they sit inside the flat
-   * region below the crossover, where the README claims nothing beyond
-   * "sequential wins", and the four remaining points already bracket the
-   * crossover on both sides.
+   * No points below 200 other than 0: values such as 10 and 50 sit inside the
+   * flat region below the crossover, where the README claims nothing beyond
+   * "sequential wins", and these four points already bracket the crossover on
+   * both sides.
    */
   @Param(Array("0", "200", "1000", "5000"))
   var fCostIters: Int = _
 
   /**
    * The README presents the crossover ("between 200 and 1,000 iterations") as a
-   * general figure, but it was only ever swept at `n = 4`. The break-even
+   * general figure, from a sweep at `n = 4` alone. The break-even
    * should move with `n`: more workers divide the work further, which pulls the
    * crossover down, while also costing more coordination, which pushes it up.
    * Sweeping `n` is what turns the table into a claim about the combinator

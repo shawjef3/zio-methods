@@ -28,9 +28,8 @@ import zio.test.TestAspect.nonFlaky
  * Every other spec asserts against a hand-written model of correct behavior,
  * which only catches deviations that were anticipated. These tests instead
  * compare against a reference implementation, so a divergence shows up whether
- * or not anyone predicted it. That is how the duplicated upstream-failure cause
- * was found: `runForeachPar` recorded a stream failure once per worker while the
- * base combinator recorded it once.
+ * or not anyone predicted it: for example, `runForeachPar` recording a stream
+ * failure once per worker where the base combinator records it once.
  *
  * ==What is compared==
  *

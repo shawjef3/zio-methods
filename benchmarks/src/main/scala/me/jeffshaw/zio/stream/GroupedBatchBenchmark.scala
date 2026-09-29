@@ -32,12 +32,10 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  *   `runForeachPar`, where `n` then bounds concurrent *batches*:
  *   `stream.grouped(100).runForeachPar(4)(batch => insertAll(batch))`"
  *
- * It is called "the one people reach for", and nothing measured it. It is
- * worth measuring because `grouped` emits one *element* per batch, so the
- * stream handed to `runForeachPar` has small chunks, the shape
- * `FetchPathBenchmark` identifies as worst for per-round cost. The recommended
- * idiom may therefore land in the worst dispatch regime, which is precisely
- * what a reader following the advice needs to know.
+ * The README calls it "the one people reach for". `grouped` emits one
+ * *element* per batch, so the stream handed to `runForeachPar` has small
+ * chunks, the shape `FetchPathBenchmark` identifies as worst for per-round
+ * cost. The recommended idiom may therefore land in the worst dispatch regime.
  *
  * The source chunk size is fixed: what varies here is the *shape the caller
  * builds*, not the shape the source emits, which `ChunkShapeBenchmark` covers.

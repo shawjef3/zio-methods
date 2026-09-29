@@ -25,7 +25,7 @@ import zio.test._
  * ordinary calls over `Chunk[Take[E, A]]`.
  *
  * `RunForeachParSpec` reaches the same logic end to end, where whether a batch
- * spans several chunks depends on scheduling. Those tests remain as
+ * spans several chunks depends on scheduling. Those tests serve as
  * integration backstops; these are the ones that state what the split is
  * supposed to do.
  */
