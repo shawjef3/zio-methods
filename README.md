@@ -36,6 +36,25 @@ The last row is the one people reach for when `f` amortizes over a batch: a bulk
 stream.grouped(100).runForeachPar(4)(batch => insertAll(batch))
 ```
 
+When you do not need the results, `runForeachPar` costs far less than `mapZIOParUnordered(n)(f).runDrain`, which buffers and re-chunks results only to throw them away. Per element, as a multiple of what `runForeachPar` costs:
+
+```mermaid
+xychart-beta
+    title "mapZIOParUnordered(4)(f).runDrain per element, relative to runForeachPar(4)(f)"
+    x-axis ["CPU, no-op f", "Allocation, no-op f", "CPU, costly f", "Allocation, costly f"]
+    y-axis "times the cost of runForeachPar" 0 --> 400
+    bar [378, 213, 55, 21]
+```
+
+| Per element | `f` | `runForeachPar(4)(f)` | `mapZIOParUnordered(4)(f).runDrain` | Ratio |
+|---|---|---|---|---|
+| CPU cycles | no-op | 79 | 30,073 | 378× |
+| Bytes allocated | no-op | 35 | 7,532 | 213× |
+| CPU cycles | `BigDecimal` cube | 559 | 30,730 | 55× |
+| Bytes allocated | `BigDecimal` cube | 373 | 8,003 | 21× |
+
+The gap narrows as `f` does real work, because `f`'s own cost is the same under both, and for an `f` that waits on I/O it becomes a rounding error (see [When `f` is slow](#when-f-is-slow-this-combinator-stops-being-the-variable)). CPU cycles count every thread, so they are total CPU work rather than wall time. Measured with `StreamParBenchmark` (500k elements in 50-element chunks, 5 forks) and JMH's `gc` and `perfnorm` profilers, on an 8-vCPU Hyper-V guest (Ryzen 7 5800X, JDK 25) under `-XX:TypeProfileWidth=8`. Under `-XX:-UseTypeProfile` the ratios are 404×, 255×, 72× and 20×.
+
 Sizing `n`: it bounds concurrent invocations of `f`, so set it to what the *downstream resource* tolerates: a connection-pool size, an API rate limit, `availableProcessors` for CPU-bound work. It is not a thread count; the workers are fibers, and tens of thousands of them are routine for I/O-bound `f` (see the high-concurrency numbers under [Performance](#performance)).
 
 ### Sizing `bufferSize` and chunks
@@ -161,7 +180,7 @@ Throughput is the optimization target; allocation is treated as a diagnostic. Th
 
 Measured on 32 cores, JMH throughput mode, at `-f 2` with 5 warmup and 5 measurement iterations unless a table says otherwise. Scores below are ± the JMH error over several forks; the `n = 4` benchmarks in particular vary enough fork to fork that single-fork runs are not comparable, so read them across forks or not at all.
 
-Every figure in this README comes from that one host, including the numbers in "Sizing `bufferSize` and chunks" and in the `rechunk` and `n == 1` notes, so they are comparable to each other. The one exception is the 4-core column of the `n` sweep in the crossover section, which is the same host with the benchmark JVM pinned to four cores, and is labelled where it appears.
+Every figure in this README comes from that one host, including the numbers in "Sizing `bufferSize` and chunks" and in the `rechunk` and `n == 1` notes, so they are comparable to each other. There are two exceptions, each labelled where it appears: the 4-core column of the `n` sweep in the crossover section, which is the same host with the benchmark JVM pinned to four cores, and the per-element overhead comparison under "Which combinator do I want?", which comes from an 8-vCPU host.
 
 Combinator overhead, 500k elements, no-op `f`, `n = 4` (`StreamParBenchmark`):
 
