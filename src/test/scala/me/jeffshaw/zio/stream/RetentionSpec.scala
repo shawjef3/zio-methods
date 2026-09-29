@@ -50,7 +50,7 @@ object RetentionSpec extends ZIOSpecDefault {
    * round handoff; `@volatile` makes that independent of those details.
    */
   private final class RoundChaser {
-    @volatile var newest: Round[Nothing, Int] = _
+    @volatile var newest: Round[Int] = _
     @volatile var passed = 0
     @volatile var fetches = 0
     @volatile var sampled = 0
@@ -64,7 +64,7 @@ object RetentionSpec extends ZIOSpecDefault {
           done match {
             case s: Exit.Success[_] =>
               ZIO.succeed {
-                newest = s.value.asInstanceOf[Round[Nothing, Int]]
+                newest = s.value.asInstanceOf[Round[Int]]
                 passed += 1
                 if (passed % SampleEvery == 0) samples.add(new WeakReference[AnyRef](newest))
               } *> advance
@@ -129,7 +129,7 @@ object RetentionSpec extends ZIOSpecDefault {
           }
         }
       val f: Int => UIO[Any] = a => gate.await.when(blockFirst && a == 1)
-      val dispatcher = new Dispatcher[Any, Nothing, Nothing, Int](n, fetch, f, _ => ZIO.unit)
+      val dispatcher = new Dispatcher[Any, Nothing, Int](n, fetch, f, _ => ZIO.unit)
       chaser.newest = dispatcher.seedForTesting
       if (pinSeed) pin.set(chaser.newest)
       dispatcher.run.as((chaser.sampled, chaser.alive)) <* ZIO.succeed(pin.set(null))

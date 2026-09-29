@@ -65,9 +65,9 @@ object DispatcherSpec extends ZIOSpecDefault {
   private val noError: Cause[Any] => UIO[Unit] = _ => ZIO.unit
 
   /**
-   * Runs the distributor with this spec's fixed type arguments.
+   * Runs the dispatcher with this spec's fixed type arguments.
    *
-   * Every test here drives `[Any, String, String, Int]`, so spelling it out at
+   * Every test here drives `[Any, String, Int]`, so spelling it out at
    * each call site buries the three things that actually vary: `n`, the
    * callback, and what the test does with a cause.
    */
@@ -75,7 +75,7 @@ object DispatcherSpec extends ZIOSpecDefault {
     f: Int => IO[String, Any],
     onError: Cause[String] => UIO[Unit] = noError
   ): UIO[Unit] =
-    Dispatcher.run[Any, String, String, Int](n, fetch, f, onError)
+    Dispatcher.run[Any, String, Int](n, fetch, f, onError)
 
   def spec =
     suite("Dispatcher")(
@@ -236,7 +236,7 @@ object DispatcherSpec extends ZIOSpecDefault {
             counts <- Ref.make(Map.empty[Int, Int])
             fetchAndCount <- scriptedFetch[String, Int](script)
             (fetch, calls) = fetchAndCount
-            _ <- runWith(n, fetch)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+            _ <- runWith(n, fetch)(a => Visits.record(counts, a))
             res <- counts.get
             fetches <- calls
           } yield assertTrue(res.size == length) &&
@@ -265,9 +265,9 @@ object DispatcherSpec extends ZIOSpecDefault {
         for {
           counts <- Ref.make(Map.empty[Int, Int])
           fetch <- scripted[String, Int](script)
-          _ <- runWith(32, fetch)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+          _ <- runWith(32, fetch)(a => Visits.record(counts, a))
           res <- counts.get
-        } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
+        } yield Visits.eachOnce(res, total)
       } @@ nonFlaky(50)
       // Per test: a broken round handoff hangs rather than fails.
     ) @@ TestAspect.timeout(5.seconds)

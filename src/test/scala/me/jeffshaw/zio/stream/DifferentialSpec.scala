@@ -47,8 +47,9 @@ import zio.test.TestAspect.nonFlaky
  *
  * Under failure neither combinator has a deterministic set of visited elements.
  * A worker can claim an element and be interrupted before the callback runs:
- * here the claim (`cursor.getAndIncrement()`) and `f` are separate effect
- * nodes, and in `ZChannel#mapOutZIOParUnordered` the element is handed to a
+ * here the effect `f` returned can be interrupted before it runs, and the rest
+ * of a batched claim is abandoned when its worker stops, and in
+ * `ZChannel#mapOutZIOParUnordered` the element is handed to a
  * forked fiber that can be interrupted between the latch and `f`. Either way
  * fail-fast teardown can strand an already-claimed element, leaving a gap.
  *
@@ -135,7 +136,7 @@ object DifferentialSpec extends ZIOSpecDefault {
     def runOne(useOurs: Boolean): UIO[Outcome] =
       for {
         seen <- Ref.make(Map.empty[Int, Int])
-        record = (a: Int) => seen.update(m => m.updated(a, m.getOrElse(a, 0) + 1))
+        record = (a: Int) => Visits.record(seen, a)
         body = (a: Int) => f(a, record)
         exit <-
           (if (useOurs) stream.runForeachPar(n, bufferSize)(body)

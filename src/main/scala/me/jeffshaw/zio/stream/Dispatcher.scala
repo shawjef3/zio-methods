@@ -102,11 +102,11 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
  * mutable state here is the seed handoff, touched once per worker at startup,
  * and [[current]].
  */
-private[stream] final class Dispatcher[R, E <: E1, E1, A](
+private[stream] final class Dispatcher[R, E, A](
   n: Int,
   fetch: ZIO[R, Nothing, Take[E, A]],
-  f: A => ZIO[R, E1, Any],
-  onError: Cause[E1] => ZIO[R, Nothing, Unit]
+  f: A => ZIO[R, E, Any],
+  onError: Cause[E] => ZIO[R, Nothing, Unit]
 )(implicit trace: Trace) {
 
   /**
@@ -122,7 +122,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
    * the run has produced (see [[Round]]), and every worker's continuations close
    * over this dispatcher.
    */
-  private[this] val seedRef = new AtomicReference[Round[E, A]](Round.data[E, A](Chunk.empty, n))
+  private[this] val seedRef = new AtomicReference[Round[A]](Round.data[A](Chunk.empty, n))
   private[this] val started = new AtomicInteger(0)
 
   /**
@@ -138,7 +138,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
    * hands the round out, so a worker that has claimed from a round reads that
    * round or a newer one, never null.
    */
-  @volatile private[this] var current: Round[E, A] = null
+  @volatile private[this] var current: Round[A] = null
 
   /**
    * What every worker starts with. The seed is read inside the suspension rather
@@ -183,17 +183,19 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
    * The seed round until every worker has started, then `null`. Nothing in a
    * run reads it; it lets `RetentionSpec` follow the round chain from its root.
    */
-  private[stream] def seedForTesting: Round[E, A] = seedRef.get
+  private[stream] def seedForTesting: Round[A] = seedRef.get
 
   /**
    * Publishes the round the fetcher just built to the workers awaiting `round`,
    * and makes it [[current]]. That write happens when `publish` is called, before
    * the returned effect completes the promise. `Promise#done` is the public
    * equivalent of the internal `promise.unsafe.done`: the same `completeWith`.
+   * Its `Boolean` is left for the caller to discard, which every caller's `*>`
+   * already does without the `map` node a `.unit` here would add per round.
    */
-  private def publish(round: Round[E, A], next: Round[E, A]): ZIO[Any, Nothing, Unit] = {
+  private def publish(round: Round[A], next: Round[A]): ZIO[Any, Nothing, Boolean] = {
     current = next
-    round.next.done(Exit.succeed(next)).unit
+    round.next.done(Exit.succeed(next))
   }
 
   /**
@@ -215,7 +217,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
    * either the chunk with its cursor past the end, or null; both send it to the
    * await branch.
    */
-  private def release(round: Round[E, A]): Unit =
+  private def release(round: Round[A]): Unit =
     round.chunk = null.asInstanceOf[Chunk[A]]
 
   /**
@@ -227,7 +229,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   private[this] val resume: Any => ZIO[R, Nothing, Unit] = _ => loop(current)
 
   /** `loop` as a function value, so awaiting a round does not allocate one. */
-  private[this] val loopFn: Round[E, A] => ZIO[R, Nothing, Unit] = round => loop(round)
+  private[this] val loopFn: Round[A] => ZIO[R, Nothing, Unit] = round => loop(round)
 
   /**
    * Continues a claim `[from, until)` of `chunk` after an element whose `f` did
@@ -247,7 +249,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
       j += 1
       effect match {
         case _: Exit.Success[_] => ()
-        case failure: Exit.Failure[E1 @unchecked] => return onError(failure.cause)
+        case failure: Exit.Failure[E @unchecked] => return onError(failure.cause)
         case _ => return continueAfter(effect, chunk, j, until)
       }
     }
@@ -268,7 +270,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
    * small is kept as is, so a claim copies at most once however often its `f`
    * suspends.
    */
-  private def continueAfter(effect: ZIO[R, E1, Any], chunk: Chunk[A], next: Int, until: Int): ZIO[R, Nothing, Unit] =
+  private def continueAfter(effect: ZIO[R, E, Any], chunk: Chunk[A], next: Int, until: Int): ZIO[R, Nothing, Unit] =
     if (next >= until) effect.foldCauseZIO(onError, resume)
     else if (chunk.length <= Round.MaxStride) effect.foldCauseZIO(onError, _ => runClaim(chunk, next, until))
     else {
@@ -287,7 +289,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
    * has been elected, so the guard is belt and braces there and the sole
    * protection at stride 1.
    */
-  private def isFetcher(round: Round[E, A], chunk: Chunk[A], i: Int, length: Int, stride: Int): Boolean =
+  private def isFetcher(round: Round[A], chunk: Chunk[A], i: Int, length: Int, stride: Int): Boolean =
     (chunk ne null) && (if (stride == 1) i == length else round.fetching.compareAndSet(false, true))
 
   /**
@@ -296,19 +298,19 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
    * worker, which reports the terminal's cause, if any, as its sole reporter; a
    * data `Take` becomes the next round, which this worker then loops onto.
    */
-  private def fetchAndPublish(round: Round[E, A]): ZIO[R, Nothing, Unit] = {
+  private def fetchAndPublish(round: Round[A]): ZIO[R, Nothing, Unit] = {
     release(round)
     fetch.flatMap { take =>
       take.exit.foldExit(
         cause =>
           Cause.flipCauseOption(cause) match {
             case None =>
-              publish(round, Round.terminal[E, A])
+              publish(round, Round.terminal[A]).unit
             case Some(c) =>
-              publish(round, Round.terminal[E, A]) *> onError(c)
+              publish(round, Round.terminal[A]) *> onError(c)
           },
         chunk => {
-          val nextRound = Round.data[E, A](chunk, n)
+          val nextRound = Round.data[A](chunk, n)
           publish(round, nextRound) *> loop(nextRound)
         }
       )
@@ -316,7 +318,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   }
 
   /** Waits for the round another worker is fetching, then loops onto it. */
-  private def awaitNext(round: Round[E, A]): ZIO[R, Nothing, Unit] =
+  private def awaitNext(round: Round[A]): ZIO[R, Nothing, Unit] =
     round.next.await.flatMap(loopFn)
 
   /**
@@ -338,7 +340,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
    * alone also measured as a no-op; what this removes for an `Exit` result is
    * the closure, the recursion and the interpreter round trip together.
    */
-  def loop(round: Round[E, A]): ZIO[R, Nothing, Unit] = {
+  private def loop(round: Round[A]): ZIO[R, Nothing, Unit] = {
     var budget = Dispatcher.TrampolineEvery
     while (true) {
       if (round.terminal) return Exit.unit
@@ -360,7 +362,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
         j += 1
         effect match {
           case _: Exit.Success[_] => ()
-          case failure: Exit.Failure[E1 @unchecked] => return onError(failure.cause)
+          case failure: Exit.Failure[E @unchecked] => return onError(failure.cause)
           case _ => return continueAfter(effect, chunk, j, until)
         }
       }
@@ -377,9 +379,10 @@ private[stream] object Dispatcher {
   /**
    * Runs the element-dispatch loop across `n` worker fibers.
    *
-   *   - `fetch` pulls the next chunk-granular [[Take]] (typically a `Queue#take`
-   *     or a channel pull). It is invoked by whichever worker becomes the
-   *     designated fetcher, exactly once per chunk.
+   *   - `fetch` pulls the next [[Take]], which becomes the next round; in
+   *     `runForeachPar` it is [[BatchingFetch]]'s, which may fuse several of
+   *     the stream's chunks into one. It is invoked by whichever worker becomes
+   *     the designated fetcher, exactly once per round.
    *   - `f` is the per-element callback; each worker runs at most one `f` at a
    *     time, so global concurrency is bounded by `n`.
    *   - `onError` is invoked to record a cause; recording must be
@@ -408,13 +411,13 @@ private[stream] object Dispatcher {
    *     children of the pool fiber and are interrupted with it when the caller
    *     closes the scope. Daemon workers would outlive a fail-fast teardown.
    */
-  def run[R, E <: E1, E1, A](
+  def run[R, E, A](
     n: Int,
     fetch: ZIO[R, Nothing, Take[E, A]],
-    f: A => ZIO[R, E1, Any],
-    onError: Cause[E1] => ZIO[R, Nothing, Unit]
+    f: A => ZIO[R, E, Any],
+    onError: Cause[E] => ZIO[R, Nothing, Unit]
   )(implicit trace: Trace): ZIO[R, Nothing, Unit] =
-    ZIO.suspendSucceed(new Dispatcher[R, E, E1, A](n, fetch, f, onError).run)
+    ZIO.suspendSucceed(new Dispatcher[R, E, A](n, fetch, f, onError).run)
 
   /**
    * How many elements whose `f` completed synchronously a worker may run in

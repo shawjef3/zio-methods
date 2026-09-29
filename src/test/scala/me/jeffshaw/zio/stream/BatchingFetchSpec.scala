@@ -24,10 +24,10 @@ import zio.test._
  * Covers the batching fetcher's fusing and terminal splitting directly, as
  * ordinary calls over `Chunk[Take[E, A]]`.
  *
- * `RunForeachParSpec` reaches the same logic end to end, but only through a
- * two-promise gate and a `bufferSize` large enough to force a multi-chunk batch.
- * Those tests remain as integration backstops; these are the ones that state
- * what the split is supposed to do.
+ * `RunForeachParSpec` reaches the same logic end to end, where whether a batch
+ * spans several chunks depends on scheduling. Those tests remain as
+ * integration backstops; these are the ones that state what the split is
+ * supposed to do.
  */
 object BatchingFetchSpec extends ZIOSpecDefault {
 
@@ -48,13 +48,10 @@ object BatchingFetchSpec extends ZIOSpecDefault {
    * its own tests below.
    */
   private def fetcher(takes: Take[String, Int]*): UIO[BatchingFetch[String, Int]] =
-    fetcherWithN(1, takes: _*)
-
-  private def fetcherWithN(n: Int, takes: Take[String, Int]*): UIO[BatchingFetch[String, Int]] =
     Queue
       .bounded[Take[String, Int]](takes.length max 1)
       .tap(q => ZIO.foreachDiscard(takes)(q.offer))
-      .map(BatchingFetch[String, Int](_, 1024, n))
+      .map(BatchingFetch[String, Int](_, 1024, 1))
 
   def spec =
     suite("BatchingFetch")(
@@ -185,7 +182,7 @@ object BatchingFetchSpec extends ZIOSpecDefault {
               b <- queuedThenTerminal(n, Take.end)
               counts <- Ref.make(Map.empty[Int, Int])
               _ <- Dispatcher
-                .run[Any, String, String, Int](n, b.effect, a => countVisit(counts, a), _ => ZIO.unit)
+                .run[Any, String, Int](n, b.effect, a => Visits.record(counts, a), _ => ZIO.unit)
               res <- counts.get
             } yield assertTrue(b.parked ne null, res.size == QueuedElements, res.values.forall(_ == 1))
           }
@@ -197,7 +194,7 @@ object BatchingFetchSpec extends ZIOSpecDefault {
               counts <- Ref.make(Map.empty[Int, Int])
               causes <- Ref.make(Vector.empty[Cause[String]])
               _ <- Dispatcher
-                .run[Any, String, String, Int](n, b.effect, a => countVisit(counts, a), c => causes.update(_ :+ c))
+                .run[Any, String, Int](n, b.effect, a => Visits.record(counts, a), c => causes.update(_ :+ c))
               res <- counts.get
               reported <- causes.get
             } yield assertTrue(
@@ -227,7 +224,4 @@ object BatchingFetchSpec extends ZIOSpecDefault {
       _ <- ZIO.foreachDiscard(0 until QueuedElements / 4)(k => q.offer(data(k * 4 until k * 4 + 4: _*)))
       _ <- q.offer(terminal)
     } yield BatchingFetch[String, Int](q, 1024, n)
-
-  private def countVisit(counts: Ref[Map[Int, Int]], a: Int): UIO[Unit] =
-    counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1))
 }

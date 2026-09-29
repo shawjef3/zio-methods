@@ -37,10 +37,10 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
  * stay chained. Those are freed once nothing holds an early round, which is
  * why [[Dispatcher]] does not keep the seed for the whole run.
  */
-private[stream] final class Round[E, A](
+private[stream] final class Round[A](
   @volatile var chunk: Chunk[A],
   val cursor: AtomicInteger,
-  val next: Promise[Nothing, Round[E, A]],
+  val next: Promise[Nothing, Round[A]],
   val terminal: Boolean,
   /**
    * How many contiguous elements one claim reserves. See [[Round.strideFor]];
@@ -150,17 +150,19 @@ private[stream] object Round {
    * far larger than `n`, which is precisely the regime where per-element
    * atomic traffic on the shared cursor is the bottleneck, and where the tail
    * a stride costs is a vanishing fraction of the round.
+   *
+   * `n` is at least 1: `runForeachPar` hands a non-positive `n` to
+   * `runForeach` before any round exists.
    */
   def strideFor(length: Int, n: Int): Int =
-    if (length <= 0 || n <= 0) 1
-    else ((length / (n.toLong * ClaimsPerWorker)).toInt max 1) min MaxStride
+    ((length / (n.toLong * ClaimsPerWorker)).toInt max 1) min MaxStride
 
-  def data[E, A](chunk: Chunk[A], n: Int): Round[E, A] = {
+  def data[A](chunk: Chunk[A], n: Int): Round[A] = {
     val stride = strideFor(chunk.length, n)
     new Round(
       chunk,
       new AtomicInteger(0),
-      makePromise[E, A],
+      makePromise[A],
       terminal = false,
       stride,
       if (stride == 1) null else new AtomicBoolean(false)
@@ -172,8 +174,8 @@ private[stream] object Round {
    * the cursor and promise are never read and are left null: a change that did
    * read them would fail loudly rather than wait on a promise nobody completes.
    */
-  def terminal[E, A]: Round[E, A] =
-    new Round[E, A](
+  def terminal[A]: Round[A] =
+    new Round[A](
       Chunk.empty,
       null,
       null,
@@ -182,6 +184,6 @@ private[stream] object Round {
       fetching = null
     )
 
-  private def makePromise[E, A]: Promise[Nothing, Round[E, A]] =
-    Promise.unsafe.make[Nothing, Round[E, A]](FiberId.None)(Unsafe)
+  private def makePromise[A]: Promise[Nothing, Round[A]] =
+    Promise.unsafe.make[Nothing, Round[A]](FiberId.None)(Unsafe)
 }

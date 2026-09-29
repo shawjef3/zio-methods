@@ -109,9 +109,9 @@ package object stream {
                 .runForeachChunk(chunk => queue.offer(Take.chunk(chunk)))
                 .foldCauseZIO(cause => queue.offer(Take.failCause(cause)), _ => queue.offer(Take.end))
                 .forkIn(childScope)
-              fetch = BatchingFetch.effect[E, A](queue, bufferSizeV, nn)
-              worker = Dispatcher.run[R1, E, E1, A](nn, fetch, f, failures.record)
-              workerFiber <- worker.forkIn(childScope)
+              workerFiber <- Dispatcher
+                .run[R1, E1, A](nn, BatchingFetch.effect[E, A](queue, bufferSizeV, nn), f, failures.record)
+                .forkIn(childScope)
               // Whichever comes first, the workers finishing or a recorded
               // failure; closing the scope then interrupts whatever still runs.
               _ <- workerFiber.join.raceFirst(failures.await)

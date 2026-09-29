@@ -40,13 +40,13 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * A terminal `Take` inside the batch is split off and parked, to be delivered by
  * the *next* fetch after the fused data round drains. Visibility: only the
- * designated fetcher (unique per round, by cursor construction) touches it, and
+ * designated fetcher (unique per round, see [[Dispatcher]]) touches it, and
  * successive fetchers are ordered by the round handoff; the [[AtomicReference]]
  * makes that independent of those details.
  *
- * One instance is built per run, and [[effect]] is likewise built once: a fetch
- * costs the `suspendSucceed` node, the parked-terminal read, the `takeBetween`,
- * and the fusing, and allocates nothing else per round.
+ * One instance is built per run, and [[effect]] is likewise built once, with
+ * its per-batch continuation: a fetch costs the parked-terminal read, the
+ * `takeBetween` and its one `flatMap` node, and the fusing.
  *
  * Fusing is the common case, not an edge case. It is tempting to read
  * "`takeBetween` suspends only when the queue is empty" as implying that
@@ -140,29 +140,30 @@ private[stream] final class BatchingFetch[E, A] private (
    * `n = 64`, versus 32 at `n = 4`. At 64- and 512-element chunks every point
    * was flat, the control this needed to pass.
    */
-  private[stream] def effect(implicit trace: Trace): ZIO[Any, Nothing, Take[E, A]] =
+  private[stream] def effect(implicit trace: Trace): ZIO[Any, Nothing, Take[E, A]] = {
+    // Built once, with `effect`, rather than as a fresh closure every fetch.
+    val onBatch: Chunk[Take[E, A]] => ZIO[Any, Nothing, Take[E, A]] = takes =>
+      if (reachesFuseTarget(takes)) Exit.succeed(split(takes))
+      else queue.takeAll.map(more => split(if (more.isEmpty) takes else takes ++ more))
     ZIO.suspendSucceed {
       val parked = pendingTerminal.get
       if (parked ne null) Exit.succeed(Take(parked))
-      else
-        queue.takeBetween(1, batchMax).flatMap { takes =>
-          if (elementsAtLeast(takes, fuseTarget)) Exit.succeed(split(takes))
-          else queue.takeAll.map(more => split(if (more.isEmpty) takes else takes ++ more))
-        }
+      else queue.takeBetween(1, batchMax).flatMap(onBatch)
     }
+  }
 
   /**
-   * Whether `takes` carries at least `target` elements, stopping as soon as it
-   * does. A terminal also stops the scan, contributing nothing: there is no
+   * Whether `takes` carries at least `fuseTarget` elements, stopping as soon as
+   * it does. A terminal also stops the scan, contributing nothing: there is no
    * point draining further for elements that cannot be dispatched before it.
    *
    * Short-circuiting matters: this runs per round, and for chunks of any real
    * size the first take settles it.
    */
-  private def elementsAtLeast(takes: Chunk[Take[E, A]], target: Int): Boolean = {
+  private def reachesFuseTarget(takes: Chunk[Take[E, A]]): Boolean = {
     var total = 0
     var i = 0
-    while (i < takes.length && total < target)
+    while (i < takes.length && total < fuseTarget)
       takes(i).exit match {
         case Exit.Success(chunk) =>
           total += chunk.length
@@ -170,7 +171,7 @@ private[stream] final class BatchingFetch[E, A] private (
         case _ =>
           i = takes.length
       }
-    total >= target
+    total >= fuseTarget
   }
 }
 
@@ -211,10 +212,10 @@ private[stream] object BatchingFetch {
     new BatchingFetch[E, A](
       queue,
       bufferSize,
-      // In `Long` then clamped: `n` is caller-supplied and routinely in the
-      // thousands, where `n * 8` in `Int` would overflow to a negative target
-      // and make every batch look like it had already met it.
-      ((n.toLong max 1L) * FuseTargetClaimsPerWorker min Int.MaxValue.toLong).toInt
+      // In `Long` then clamped: `n` is caller-supplied and can be large enough
+      // that `n * 8` in `Int` would overflow to a negative target and make
+      // every batch look like it had already met it.
+      (n.toLong * FuseTargetClaimsPerWorker min Int.MaxValue.toLong).toInt
     )
 
   /** Builds the per-run fetcher over `queue` and returns its [[BatchingFetch#effect]]. */

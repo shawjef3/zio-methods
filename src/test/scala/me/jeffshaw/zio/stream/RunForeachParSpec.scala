@@ -101,9 +101,9 @@ object RunForeachParSpec extends ZIOSpecDefault {
           counts <- Ref.make(Map.empty[Int, Int])
           _ <- ZStream
             .range(0, total)
-            .runForeachPar(32)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+            .runForeachPar(32)(a => Visits.record(counts, a))
           res <- counts.get
-        } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
+        } yield Visits.eachOnce(res, total)
       } @@ nonFlaky(20),
       test("visits every element exactly once with many small chunks") {
         // Small chunks under high `n` cross the round boundary as often as
@@ -116,23 +116,23 @@ object RunForeachParSpec extends ZIOSpecDefault {
           counts <- Ref.make(Map.empty[Int, Int])
           _ <- ZStream
             .fromChunks(chunks.toSeq: _*)
-            .runForeachPar(64)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+            .runForeachPar(64)(a => Visits.record(counts, a))
           res <- counts.get
-        } yield assertTrue(res.size == expected.length) && assertTrue(res.values.forall(_ == 1))
+        } yield Visits.eachOnce(res, expected.length)
       } @@ nonFlaky(50),
       test("visits every element exactly once for each bufferSize") {
         // Exercises the `bufferSize` overload, including `bufferSize == 1`,
-        // where `batchMax == 1` disables batch fusion entirely, and larger
-        // sizes, where several chunks are fused into one round.
+        // where each take is one chunk and only the drain toward the fuse
+        // target can fuse, and larger sizes, where one take fuses several.
         val total = 2000
         checkAll(Gen.fromIterable(Chunk(1, 2, 16, 128))) { bufferSize =>
           for {
             counts <- Ref.make(Map.empty[Int, Int])
             _ <- ZStream
               .range(0, total, chunkSize = 8)
-              .runForeachPar(16, bufferSize)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+              .runForeachPar(16, bufferSize)(a => Visits.record(counts, a))
             res <- counts.get
-          } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
+          } yield Visits.eachOnce(res, total)
         }
       } @@ nonFlaky(20),
       test("a concurrent failure is always recorded") {
@@ -195,9 +195,9 @@ object RunForeachParSpec extends ZIOSpecDefault {
             counts <- Ref.make(Map.empty[Int, Int])
             _ <- ZStream
               .range(0, 200, chunkSize = 8)
-              .runForeachPar(4, bufferSize)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+              .runForeachPar(4, bufferSize)(a => Visits.record(counts, a))
             res <- counts.get
-          } yield assertTrue(res.size == 200) && assertTrue(res.values.forall(_ == 1))
+          } yield Visits.eachOnce(res, 200)
         }
       },
       test("n == 1 visits every element exactly once") {
@@ -210,9 +210,9 @@ object RunForeachParSpec extends ZIOSpecDefault {
             counts <- Ref.make(Map.empty[Int, Int])
             _ <- ZStream
               .range(0, total, chunkSize = 8)
-              .runForeachPar(1, bufferSize)(a => counts.update(m => m.updated(a, m.getOrElse(a, 0) + 1)))
+              .runForeachPar(1, bufferSize)(a => Visits.record(counts, a))
             res <- counts.get
-          } yield assertTrue(res.size == total) && assertTrue(res.values.forall(_ == 1))
+          } yield Visits.eachOnce(res, total)
         }
       } @@ nonFlaky(20),
       test("n == 1 runs one invocation of f at a time") {
