@@ -135,11 +135,11 @@ object RetentionSpec extends ZIOSpecDefault {
       dispatcher.run.as((chaser.sampled, chaser.alive)) <* ZIO.succeed(pin.set(null))
     }
 
-  private final class Payload(val id: Int) {
-    // Large enough that retaining the whole stream is an OOM rather than a
-    // curiosity, and that the GC has an incentive to actually collect.
-    val filler = new Array[Byte](1024)
-  }
+  /**
+   * A stream element with its own identity, so a weak reference to it tracks
+   * whether this element, rather than a shared boxed value, is still reachable.
+   */
+  private final class Payload(val id: Int)
 
   private val PayloadCount = 20000
   private val ChunkSize = 100

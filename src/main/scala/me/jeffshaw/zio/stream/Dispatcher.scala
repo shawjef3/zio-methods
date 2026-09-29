@@ -138,7 +138,7 @@ private[stream] final class Dispatcher[R, E, A](
    * hands the round out, so a worker that has claimed from a round reads that
    * round or a newer one, never null.
    */
-  @volatile private[this] var latest: Round[A] = null
+  @volatile private[this] var latest: Round[A] = _
 
   /**
    * What every worker starts with. The seed is read inside the suspension rather
