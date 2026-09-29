@@ -46,14 +46,19 @@ xychart-beta
     bar [378, 213, 55, 21]
 ```
 
-The two middle columns give each approach's cost per stream element. In a CPU row that is CPU clock cycles counted across every thread of the benchmark JVM (the stream producer, `f`, ZIO's scheduler, garbage collection and JIT compilation included), divided by the number of elements, so it is total CPU work rather than wall time. In an allocation row it is bytes allocated per element.
+CPU cycles per element, counted across every thread of the benchmark JVM (the stream producer, `f`, ZIO's scheduler, garbage collection and JIT compilation included), so they measure total CPU work rather than wall time:
 
-| Per element | `f` | `runForeachPar(4)(f)` | `mapZIOParUnordered(4)(f).runDrain` | Ratio |
-|---|---|---|---|---|
-| CPU | no-op | 79 | 30,073 | 378× |
-| Allocation | no-op | 35 bytes | 7,532 bytes | 213× |
-| CPU | `BigDecimal` cube | 559 | 30,730 | 55× |
-| Allocation | `BigDecimal` cube | 373 bytes | 8,003 bytes | 21× |
+| `f` | `runForeachPar(4)(f)` | `mapZIOParUnordered(4)(f).runDrain` | Ratio |
+|---|---|---|---|
+| no-op | 79 | 30,073 | 378× |
+| `BigDecimal` cube | 559 | 30,730 | 55× |
+
+Bytes allocated per element:
+
+| `f` | `runForeachPar(4)(f)` | `mapZIOParUnordered(4)(f).runDrain` | Ratio |
+|---|---|---|---|
+| no-op | 35 | 7,532 | 213× |
+| `BigDecimal` cube | 373 | 8,003 | 21× |
 
 The gap narrows as `f` does real work, because `f`'s own cost is the same under both, and for an `f` that waits on I/O it becomes a rounding error (see [When `f` is slow](#when-f-is-slow-this-combinator-stops-being-the-variable)). Measured with `StreamParBenchmark` (500k elements in 50-element chunks, 5 forks) and JMH's `gc` and `perfnorm` profilers, on an 8-vCPU Hyper-V guest (Ryzen 7 5800X, JDK 25) under `-XX:TypeProfileWidth=8`. Under `-XX:-UseTypeProfile` the ratios are 404×, 255×, 72× and 20×.
 
