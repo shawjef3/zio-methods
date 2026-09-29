@@ -25,21 +25,21 @@ import java.util.concurrent.TimeUnit
 import me.jeffshaw.zio.stream.BenchmarkUtil._
 
 /**
- * Stresses the tail imbalance that `Round.MaxStride` exists to bound, using an
+ * Stresses the tail imbalance that `Round.MaxClaimSize` exists to bound, using an
  * `f` whose cost varies between elements.
  *
  * ==Why this benchmark exists==
  *
- * `MaxStride` was raised from 16 to 256 on the strength of a +12.8% measurement
+ * `MaxClaimSize` was raised from 16 to 256 on the strength of a +12.8% measurement
  * with a no-op `f`. The cap's stated purpose is to bound the tail: a worker
- * commits to `stride` elements before it can know whether it will be the round's
- * straggler, so the other workers may wait up to `(stride - 1) * cost(f)`. At 256
+ * commits to `claimSize` elements before it can know whether it will be the round's
+ * straggler, so the other workers may wait up to `(claimSize - 1) * cost(f)`. At 256
  * that exposure is sixteen times what it was.
  *
  * The check run at the time, `CrossoverBenchmark` at `fCostIters = 5000`, used a
  * '''uniform''' `f`. Uniform cost cannot produce a straggler, because every claim
  * is equally slow, so it does not test the cap's purpose at all. `Round.scala`
- * records an earlier stride experiment that measured 7 to 9% slower for exactly
+ * records an earlier claim-size experiment that measured 7 to 9% slower for exactly
  * this reason, which is what makes the gap worth closing.
  *
  * ==The shape of the skew==
@@ -64,17 +64,17 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * not being eliminated, merely dwarfed.
  *
  * Hence `fastCostIters = 20000` (about 284ns, roughly fifteen times dispatch)
- * and a 20x ratio (about 5.7us per slow element). A stride-256 claim landing
+ * and a 20x ratio (about 5.7us per slow element). A 256-element claim landing
  * entirely on slow elements then serializes roughly 1.5ms, which is the tail the
- * cap exists to bound, while at stride 16 the same cluster spreads over sixteen
+ * cap exists to bound, while at claim size 16 the same cluster spreads over sixteen
  * claims that peers can take.
  *
  * ==How to read it==
  *
- * Run against `MaxStride = 16` and `MaxStride = 256`. The prediction the cap
+ * Run against `MaxClaimSize = 16` and `MaxClaimSize = 256`. The prediction the cap
  * embodies is that 256 is worse here, and the size of that gap is what says
  * whether the +12.8% was bought at an unacceptable price. A configuration where
- * the stride is pinned to 1 regardless (`n` large relative to the round) is the
+ * the claim size is pinned to 1 regardless (`n` large relative to the round) is the
  * control that must not move.
  */
 @State(JScope.Benchmark)
@@ -93,14 +93,14 @@ class SkewedCostBenchmark {
   var totalElements: Int = _
 
   /**
-   * 512 with fusion gives a stride of 256 at `n = 4`, so the cap binds and the
+   * 512 with fusion gives a claim size of 256 at `n = 4`, so the cap binds and the
    * old cap of 16 differs by the full sixteen times.
    */
   @Param(Array("512"))
   var chunkSize: Int = _
 
   /**
-   * 4 is where the cap binds hardest. 256 pins the stride to 1 whatever the cap
+   * 4 is where the cap binds hardest. 256 pins the claim size to 1 whatever the cap
    * is, so it is the control.
    */
   @Param(Array("4", "256"))
@@ -124,7 +124,7 @@ class SkewedCostBenchmark {
   var costRatio: Int = _
 
   /**
-   * Contiguous slow elements per cluster. Sized near the stride so a single
+   * Contiguous slow elements per cluster. Sized near the claim size so a single
    * claim can be filled with slow work, which is the straggler the cap bounds.
    */
   @Param(Array("256"))

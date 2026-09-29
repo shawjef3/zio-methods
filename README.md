@@ -217,10 +217,10 @@ worker owns a whole chunk starves workers whenever there are fewer chunks than
 There is no barrier at chunk boundaries (a worker that finishes an element
 immediately claims the next), so one slow `f` never idles the other workers.
 
-The round/cursor protocol itself: a *round* holds a chunk, a cursor, a stride,
+The round/cursor protocol itself: a *round* holds a chunk, a cursor, a claim size,
 and a promise for the next round. Each worker claims a range with
-`i = cursor.getAndAdd(stride)`; `i < length` runs `f` over
-`[i, min(i + stride, length))`, `i >= length` means the round is drained and
+`i = cursor.getAndAdd(claimSize)`; `i < length` runs `f` over
+`[i, min(i + claimSize, length))`, `i >= length` means the round is drained and
 elects one worker as the designated fetcher, and a worker that is not elected
 awaits the next round. Terminal rounds carry the end-of-stream or failure
 signal, and are detected before the cursor is touched.
@@ -228,14 +228,14 @@ signal, and are detected before the cursor is touched.
 ### Claims are batched only where batching is free
 
 Once `f` is cheap, the cost of dispatch is the cursor's atomic operation, paid
-per element. A worker therefore claims a contiguous *range* of `stride` elements
+per element. A worker therefore claims a contiguous *range* of `claimSize` elements
 per atomic and runs them without returning to the cursor.
 
-The stride is what makes this safe. It is derived per round as
+The claim size is what makes this safe. It is derived per round as
 `length / (n * 8)`, capped at 64: every worker is left at least eight claims, so
 a worker that draws one oversized claim is at most an eighth of the round behind
 the rest, whatever `f` costs. Below `n * 8` elements per round the quotient is
-zero, the stride pins to 1, and dispatch is exactly per-element again, so the
+zero, the claim size pins to 1, and dispatch is exactly per-element again, so the
 "single chunk saturates all `n` workers" guarantee holds unchanged, and a slow
 `f`, where a round rarely has that many elements per worker, never batches at
 all.
@@ -250,21 +250,21 @@ improves both. A change to the cap therefore has to be measured against
 `SkewedCostBenchmark` and not only against the uniform benchmarks, because a
 uniform `f` cannot produce a straggler and so cannot detect the regression.
 
-Sizing the stride to give each worker *one* claim (`length / n`) was tried first
+Sizing claims to give each worker *one* claim (`length / n`) was tried first
 and measured 7–9% **slower** at `n` in the thousands with a 5 ms `f`: with one
 claim apiece the round ends when the slowest single claim ends, so a 16-element
 claim serialized 80 ms behind everyone else. Requiring several claims per worker
 keeps the amortization where `f` is cheap and restores fine-grained balance
 where it is not.
 
-Stride 1 is kept as a literal fast path (`getAndIncrement` rather than
+Claim size 1 is kept as a literal fast path (`getAndIncrement` rather than
 `getAndAdd(1)`, `f` invoked directly rather than through the range loop, and no
 election flag allocated), so the slow-`f` regime runs the pre-batching code with
 no added work. Without that fast path it measured ~2–4% slower at `n = 16384`.
 
-A stride above 1 also changes how the fetcher is elected. With unit strides the
+A claim size above 1 also changes how the fetcher is elected. With single-element claims the
 cursor's values are consecutive, so exactly one worker sees `i == length` and
-that test elects it for free. A larger stride makes the values skip, so none need
+that test elects it for free. A larger claim size makes the values skip, so none need
 land on `length` at all and the same test would elect *nobody* and hang the run;
 batched rounds elect by CAS on a per-round flag instead. `claims partition the
 chunk at every length/n ratio` is the regression test for this: reverting the
@@ -318,7 +318,7 @@ it bounds the batch in *chunks* while what a round needs is *elements*. At one
 element per chunk the default of 16 yields a 16-element round, which is the
 regime measured roughly 20× slower than 64-element chunks at equal element
 count. So when a batch falls short of `n * 8` elements, the same threshold below
-which the stride pins to 1 and claim batching does not engage at all, the
+which the claim size pins to 1 and claim batching does not engage at all, the
 fetcher keeps draining with a non-blocking `takeAll`. That cannot add latency or
 stall a slow producer, since `takeAll` returns empty on a dry queue, and it is
 skipped entirely once the first take already clears the target, which is the
@@ -417,7 +417,7 @@ the per-round wake, and `OPTIMIZATION_IDEAS.md` has the candidate fixes; none is
 implemented.
 
 Batching does not engage in this regime at all, since rounds hold fewer than
-`n * 8` elements and the stride is 1, and the stride-1 fast paths exist to keep
+`n * 8` elements and the claim size is 1, and the single-element-claim fast paths exist to keep
 it costing nothing there: measured against per-element claims it is a wash
 (3.21 ± 0.11 vs 3.24 ± 0.05 ops/s at `n = 16384`).
 
@@ -461,7 +461,7 @@ This is guidance for sizing `n`, not something the library should infer. For the
 I/O-bound `f` this combinator is built for, the right `n` follows the downstream
 resource and is routinely in the thousands, unrelated to the core count; and
 `availableProcessors` under-reports or misreports inside containers with CPU
-quotas. The internal knobs that do scale with parallelism, the claim stride and
+quotas. The internal knobs that do scale with parallelism, the claim size and
 the fusion target, already key off `n` rather than the core count, which is the
 correct choice whenever the two differ.
 
@@ -506,7 +506,7 @@ real I/O is far past it.
     and `fCost` deciding whether the cost matters.
   - `SkewedCostBenchmark`: tail imbalance, with expensive elements clustered so
     one claim can land entirely on them. This is the benchmark a change to
-    `Round.MaxStride` has to pass; a uniform `f` cannot produce a straggler.
+    `Round.MaxClaimSize` has to pass; a uniform `f` cannot produce a straggler.
   - `ElementTypeBenchmark`: what the element type costs, which is why the others
     use a reference type rather than `Chunk[Int]`.
 

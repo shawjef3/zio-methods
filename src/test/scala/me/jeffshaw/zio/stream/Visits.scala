@@ -28,5 +28,5 @@ private[stream] object Visits {
 
   /** That `total` distinct elements were each visited exactly once. */
   def eachOnce(visits: Map[Int, Int], total: Int): TestResult =
-    assertTrue(visits.size == total) && assertTrue(visits.values.forall(_ == 1))
+    assertTrue(visits.size == total, visits.values.forall(_ == 1))
 }

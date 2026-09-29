@@ -76,20 +76,20 @@ object BatchingFetchSpec extends ZIOSpecDefault {
             b <- fetcher()
             out = b.split(Chunk(data(1, 2), data(3)))
           } yield assertTrue(elements(out).contains(Chunk(1, 2, 3))) &&
-            assertTrue(b.parked eq null)
+            assertTrue(b.parkedTerminalForTesting eq null)
         },
         test("a terminal at index 0 is returned alone and parks nothing") {
           for {
             b <- fetcher()
             out = b.split(Chunk(Take.end, data(1)))
-          } yield assertTrue(elements(out).isEmpty) && assertTrue(b.parked eq null)
+          } yield assertTrue(elements(out).isEmpty) && assertTrue(b.parkedTerminalForTesting eq null)
         },
         test("a terminal mid-batch is parked and the data ahead of it is fused") {
           for {
             b <- fetcher()
             out = b.split(Chunk(data(1, 2), data(3), Take.end))
           } yield assertTrue(elements(out).contains(Chunk(1, 2, 3))) &&
-            assertTrue(b.parked ne null)
+            assertTrue(b.parkedTerminalForTesting ne null)
         },
         test("data after a mid-batch terminal is dropped, as the stream ended there") {
           for {
@@ -100,14 +100,14 @@ object BatchingFetchSpec extends ZIOSpecDefault {
       ),
       suite("element-poor drain")(
         test("an element-poor batch is topped up past bufferSize's chunk bound") {
-          // Eight single-element chunks with batchMax = 2: `takeBetween` can
+          // Eight single-element chunks with maxChunksPerBatch = 2: `takeBetween` can
           // return at most 2, which is element-poor for n = 1 (target 8), so the
           // fetch drains the rest non-blockingly and one round carries all 8.
           for {
             q <- Queue.bounded[Take[String, Int]](16)
             _ <- ZIO.foreachDiscard(1 to 8)(i => q.offer(data(i)))
             b = BatchingFetch[String, Int](q, 2, 1)
-            out <- b.effect
+            out <- b.fetch
           } yield assertTrue(elements(out).contains(Chunk(1, 2, 3, 4, 5, 6, 7, 8)))
         },
         test("a batch already at target is not drained further") {
@@ -116,8 +116,8 @@ object BatchingFetchSpec extends ZIOSpecDefault {
             _ <- q.offer(data(1, 2, 3, 4, 5, 6, 7, 8))
             _ <- q.offer(data(9))
             b = BatchingFetch[String, Int](q, 1, 1)
-            first <- b.effect
-            second <- b.effect
+            first <- b.fetch
+            second <- b.fetch
           } yield assertTrue(elements(first).contains(Chunk(1, 2, 3, 4, 5, 6, 7, 8))) &&
             assertTrue(elements(second).contains(Chunk(9)))
         },
@@ -126,7 +126,7 @@ object BatchingFetchSpec extends ZIOSpecDefault {
             q <- Queue.bounded[Take[String, Int]](16)
             _ <- q.offer(data(1))
             b = BatchingFetch[String, Int](q, 4, 1)
-            out <- b.effect.timeoutFail("blocked")(5.seconds).either
+            out <- b.fetch.timeoutFail("blocked")(5.seconds).either
           } yield assertTrue(out.isRight) &&
             assertTrue(out.toOption.flatMap(elements).contains(Chunk(1)))
         },
@@ -137,8 +137,8 @@ object BatchingFetchSpec extends ZIOSpecDefault {
             _ <- q.offer(data(2))
             _ <- q.offer(Take.end)
             b = BatchingFetch[String, Int](q, 1, 1)
-            first <- b.effect
-            second <- b.effect
+            first <- b.fetch
+            second <- b.fetch
           } yield assertTrue(elements(first).contains(Chunk(1, 2))) &&
             assertTrue(elements(second).isEmpty)
         }
@@ -147,16 +147,16 @@ object BatchingFetchSpec extends ZIOSpecDefault {
         test("delivers the fused data round, then the parked terminal") {
           for {
             b <- fetcher(data(1, 2), data(3), Take.end)
-            first <- b.effect
-            second <- b.effect
+            first <- b.fetch
+            second <- b.fetch
           } yield assertTrue(elements(first).contains(Chunk(1, 2, 3))) &&
             assertTrue(elements(second).isEmpty)
         },
         test("a parked failing terminal survives to the next fetch") {
           for {
             b <- fetcher(data(1), Take.fail("boom"))
-            first <- b.effect
-            second <- b.effect
+            first <- b.fetch
+            second <- b.fetch
             cause = second.exit match {
               case Exit.Failure(c) => Cause.flipCauseOption(c)
               case _ => None
@@ -169,9 +169,9 @@ object BatchingFetchSpec extends ZIOSpecDefault {
           // rather than falling through to a queue pull that would block.
           for {
             b <- fetcher(data(1), Take.end)
-            _ <- b.effect
-            second <- b.effect
-            third <- b.effect
+            _ <- b.fetch
+            second <- b.fetch
+            third <- b.fetch
           } yield assertTrue(elements(second).isEmpty) && assertTrue(elements(third).isEmpty)
         }
       ),
@@ -182,9 +182,13 @@ object BatchingFetchSpec extends ZIOSpecDefault {
               b <- queuedThenTerminal(n, Take.end)
               counts <- Ref.make(Map.empty[Int, Int])
               _ <- Dispatcher
-                .run[Any, String, Int](n, b.effect, a => Visits.record(counts, a), _ => ZIO.unit)
+                .run[Any, String, Int](n, b.fetch, a => Visits.record(counts, a), _ => ZIO.unit)
               res <- counts.get
-            } yield assertTrue(b.parked ne null, res.size == QueuedElements, res.values.forall(_ == 1))
+            } yield assertTrue(
+              b.parkedTerminalForTesting ne null,
+              res.size == QueuedElements,
+              res.values.forall(_ == 1)
+            )
           }
         },
         test("a failing terminal fused mid-batch is parked, then reported once after its data") {
@@ -194,11 +198,11 @@ object BatchingFetchSpec extends ZIOSpecDefault {
               counts <- Ref.make(Map.empty[Int, Int])
               causes <- Ref.make(Vector.empty[Cause[String]])
               _ <- Dispatcher
-                .run[Any, String, Int](n, b.effect, a => Visits.record(counts, a), c => causes.update(_ :+ c))
+                .run[Any, String, Int](n, b.fetch, a => Visits.record(counts, a), c => causes.update(_ :+ c))
               res <- counts.get
               reported <- causes.get
             } yield assertTrue(
-              b.parked ne null,
+              b.parkedTerminalForTesting ne null,
               res.size == QueuedElements,
               res.values.forall(_ == 1),
               reported.map(_.failures) == Vector(List("boom"))

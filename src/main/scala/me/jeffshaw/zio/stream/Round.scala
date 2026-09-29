@@ -41,22 +41,22 @@ private[stream] final class Round[A](
   @volatile var chunk: Chunk[A],
   val cursor: AtomicInteger,
   val next: Promise[Nothing, Round[A]],
-  val terminal: Boolean,
+  val isTerminal: Boolean,
   /**
-   * How many contiguous elements one claim reserves. See [[Round.strideFor]];
-   * a stride of `1` reproduces the one-element-per-atomic behavior exactly.
+   * How many contiguous elements one claim reserves. See [[Round.claimSizeFor]];
+   * a claim size of `1` reproduces the one-element-per-atomic behavior exactly.
    */
-  val stride: Int,
+  val claimSize: Int,
   /**
-   * Elects the round's single designated fetcher when `stride > 1`: the first
+   * Elects the round's single designated fetcher when `claimSize > 1`: the first
    * worker to find the cursor at or past the end wins it by CAS.
    * [[Dispatcher]] explains why only batched rounds need it.
    *
-   * `null` for a stride-1 round, where `i == length` elects for free, so the
+   * `null` for a round of single-element claims, where `i == length` elects for free, so the
    * flag is neither allocated nor read. That keeps a slow-`f` run, where every
-   * round is stride 1, allocating exactly what it did before batching existed.
+   * round claims one element at a time, allocating exactly what it did before batching existed.
    */
-  val fetching: AtomicBoolean
+  val fetcherElected: AtomicBoolean
 )
 
 private[stream] object Round {
@@ -64,15 +64,15 @@ private[stream] object Round {
   /**
    * The most elements one claim may reserve.
    *
-   * A stride trades load balance against atomic traffic. A worker commits to
-   * `stride` elements before it can know whether it will be the round's
-   * straggler, so the tail costs up to `(stride - 1) * cost(f)` of idle time
-   * for the other workers to save `(stride - 1) / stride` of the cursor's
+   * Claim size trades load balance against atomic traffic. A worker commits to
+   * `claimSize` elements before it can know whether it will be the round's
+   * straggler, so the tail costs up to `(claimSize - 1) * cost(f)` of idle time
+   * for the other workers to save `(claimSize - 1) / claimSize` of the cursor's
    * atomic operations. The cap bounds that tail.
    *
    * 64 rather than 16, which is where this was originally set. At 16 the cap was
    * binding hard in the regime it matters most: at 512-element chunks with
-   * `n = 4`, a fused round of sixteen chunks wants a stride of `8192 / 32 = 256`,
+   * `n = 4`, a fused round of sixteen chunks wants a claim size of `8192 / 32 = 256`,
    * so 16 discarded most of the available amortization.
    *
    * Swept against two benchmarks, because one alone is misleading in each
@@ -81,7 +81,7 @@ private[stream] object Round {
    * `costRatio = 20`, `n = 4` clusters expensive elements so one claim can land
    * entirely on them, which is the tail this cap exists to bound.
    *
-   * | `MaxStride` | uniform | skew |
+   * | `MaxClaimSize` | uniform | skew |
    * |---|---|---|
    * | 16 | 646.41 ± 34.05 | 50.24 ± 1.80 |
    * | 32 | 652.41 ± 54.23 (+0.9%) | 51.54 ± 2.07 (+2.6%) |
@@ -104,10 +104,10 @@ private[stream] object Round {
    * The underlying reason is worth keeping in view. [[ClaimsPerWorker]] bounds
    * the tail at `1 / ClaimsPerWorker` of the round '''in units of work''',
    * whatever `f` costs, because `length / (n * ClaimsPerWorker)` shrinks the
-   * stride exactly when a round holds few elements per worker. That bound is
+   * claim size exactly when a round holds few elements per worker. That bound is
    * independent of `cost(f)`, which is what makes it sound. This cap is an
    * absolute element count, so once it binds it silently replaces that guarantee
-   * with "at most `MaxStride` elements, however long those take". At 256
+   * with "at most `MaxClaimSize` elements, however long those take". At 256
    * clustered slow elements that was roughly 1.5ms serialized behind one worker.
    *
    * So the cap is a backstop for rounds large enough that even a work-proportional
@@ -115,7 +115,7 @@ private[stream] object Round {
    * pathological elements is still survivable. Raising it further needs the skew
    * benchmark, not just the uniform one.
    */
-  private[stream] final val MaxStride = 64
+  private[stream] final val MaxClaimSize = 64
 
   /**
    * How many claims each worker should get per round, at minimum. This is what
@@ -123,12 +123,12 @@ private[stream] object Round {
    * `c` claims apiece, a worker that draws one oversized claim is at most
    * `1 / c` of the round behind, whatever `f` costs.
    *
-   * A stride sized to give each worker exactly one claim is what an earlier
+   * Sizing claims so that each worker gets exactly one is what an earlier
    * revision did, and it measured 7-9% *slower* at `n` in the thousands with a
    * 5ms `f`: one claim per worker means the round ends when the slowest single
    * claim ends, so a 16-element claim serialized 80ms behind the others.
    * Requiring several claims apiece keeps the same amortization for a cheap
-   * `f`, where the stride is capped by `MaxStride` long before this bites,
+   * `f`, where the claim size is capped by `MaxClaimSize` long before this bites,
    * while restoring fine-grained balance once elements per worker is the
    * binding constraint.
    */
@@ -143,34 +143,34 @@ private[stream] object Round {
    * claim per worker, and this asks for several: a chunk of `>= n` elements
    * still reaches all `n` workers, the "a single chunk keeps all n workers
    * busy" guarantee, because below `n * ClaimsPerWorker` elements per round
-   * the quotient is 0 and `max 1` pins the stride to 1, degrading dispatch to
+   * the quotient is 0 and `max 1` pins the claim size to 1, degrading dispatch to
    * exactly the per-element cursor.
    *
    * Batching therefore engages only where it is both safe and useful: rounds
    * far larger than `n`, which is precisely the regime where per-element
    * atomic traffic on the shared cursor is the bottleneck, and where the tail
-   * a stride costs is a vanishing fraction of the round.
+   * a larger claim costs is a vanishing fraction of the round.
    *
    * `n` is at least 1: `runForeachPar` hands a non-positive `n` to
    * `runForeach` before any round exists.
    */
-  def strideFor(length: Int, n: Int): Int =
-    ((length / (n.toLong * ClaimsPerWorker)).toInt max 1) min MaxStride
+  def claimSizeFor(length: Int, n: Int): Int =
+    ((length / (n.toLong * ClaimsPerWorker)).toInt max 1) min MaxClaimSize
 
   def data[A](chunk: Chunk[A], n: Int): Round[A] = {
-    val stride = strideFor(chunk.length, n)
+    val claimSize = claimSizeFor(chunk.length, n)
     new Round(
       chunk,
       new AtomicInteger(0),
       makePromise[A],
-      terminal = false,
-      stride,
-      if (stride == 1) null else new AtomicBoolean(false)
+      isTerminal = false,
+      claimSize,
+      if (claimSize == 1) null else new AtomicBoolean(false)
     )
   }
 
   /**
-   * A stop signal. `loop` checks `terminal` before touching anything else, so
+   * A stop signal. `loop` checks `isTerminal` before touching anything else, so
    * the cursor and promise are never read and are left null: a change that did
    * read them would fail loudly rather than wait on a promise nobody completes.
    */
@@ -179,9 +179,9 @@ private[stream] object Round {
       Chunk.empty,
       null,
       null,
-      terminal = true,
-      stride = 1,
-      fetching = null
+      isTerminal = true,
+      claimSize = 1,
+      fetcherElected = null
     )
 
   private def makePromise[A]: Promise[Nothing, Round[A]] =

@@ -35,11 +35,11 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
  *
  * ==Protocol==
  *
- * A [[Round]] holds the current chunk, an [[AtomicInteger]] cursor, a `stride`,
+ * A [[Round]] holds the current chunk, an [[AtomicInteger]] cursor, a `claimSize`,
  * and a `Promise` for the next round. A worker reads the current round and
- * claims a contiguous range of elements with `i = cursor.getAndAdd(stride)`:
+ * claims a contiguous range of elements with `i = cursor.getAndAdd(claimSize)`:
  *
- *   - `i < chunk.length`: run `f` over `[i, min(i + stride, length))`, one
+ *   - `i < chunk.length`: run `f` over `[i, min(i + claimSize, length))`, one
  *     element after another without returning to the cursor, then loop on the
  *     same round.
  *   - `i >= chunk.length`: the round is exhausted, and exactly one worker here is
@@ -51,25 +51,25 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
  *   - `i >= chunk.length` and not elected: another worker is fetching; await
  *     `next`, then loop on the round it published.
  *
- * ==Stride==
+ * ==Claim size==
  *
- * A stride above 1 amortizes the cursor's atomic operation over several
+ * A claim size above 1 amortizes the cursor's atomic operation over several
  * elements, which is what the dispatch loop's cost is dominated by once `f` is
  * cheap. It is derived per round from `length / (n * ClaimsPerWorker)`, so it
  * engages only for rounds far larger than `n` and always leaves every worker
  * several claims, so the load balance a shared cursor exists to provide is
  * preserved, and a chunk of `>= n` elements still reaches all `n` workers.
- * Below that threshold the stride is 1 and dispatch is exactly per-element.
+ * Below that threshold the claim size is 1 and dispatch is exactly per-element.
  *
- * The stride also decides how the fetcher is elected. At stride 1 the bases are
+ * The claim size also decides how the fetcher is elected. At claim size 1 the bases are
  * consecutive, so exactly one worker sees `i == length` and that test elects it
- * with no extra atomic. A larger stride makes the bases skip, so none need land
+ * with no extra atomic. A larger claim size makes the bases skip, so none need land
  * on `length` at all and the same test would elect nobody and hang the run;
- * those rounds elect by CAS on `fetching` instead, which costs one atomic per
+ * those rounds elect by CAS on `fetcherElected` instead, which costs one atomic per
  * round on rounds that are by construction large.
  *
  * A terminal [[Take]] (end-of-stream or failure) yields a ''terminal round''.
- * Any worker reaching one stops, because `loop` checks `round.terminal` before
+ * Any worker reaching one stops, because `loop` checks `round.isTerminal` before
  * touching the cursor: the worker that published it loops onto it and returns,
  * and every worker awaiting the *previous* round's `next` receives it and hits
  * the same check. A terminal round's own `next` and cursor are therefore never
@@ -100,7 +100,7 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
  * the per-element ones. They are immutable and only read, so the sharing needs
  * no synchronization. The mutable state of a run lives in [[Round]]; the only
  * mutable state here is the seed handoff, touched once per worker at startup,
- * and [[current]].
+ * and [[latest]].
  */
 private[stream] final class Dispatcher[R, E, A](
   n: Int,
@@ -111,7 +111,7 @@ private[stream] final class Dispatcher[R, E, A](
 
   /**
    * The seed round: an already-exhausted placeholder, so every worker's first
-   * claim lands at or past its end. Its length is 0, making it a stride-1 round,
+   * claim lands at or past its end. Its length is 0, making it a round of single-element claims,
    * so exactly one worker sees `i == 0 == length` and performs the initial fetch
    * while the rest await the round it publishes. Arrival order does not matter:
    * a worker that starts after the seed was released finds `chunk == null`,
@@ -123,7 +123,7 @@ private[stream] final class Dispatcher[R, E, A](
    * over this dispatcher.
    */
   private[this] val seedRef = new AtomicReference[Round[A]](Round.data[A](Chunk.empty, n))
-  private[this] val started = new AtomicInteger(0)
+  private[this] val startedWorkers = new AtomicInteger(0)
 
   /**
    * The newest round published so far, which a worker resumes from after an `f`
@@ -138,7 +138,7 @@ private[stream] final class Dispatcher[R, E, A](
    * hands the round out, so a worker that has claimed from a round reads that
    * round or a newer one, never null.
    */
-  @volatile private[this] var current: Round[A] = null
+  @volatile private[this] var latest: Round[A] = null
 
   /**
    * What every worker starts with. The seed is read inside the suspension rather
@@ -152,9 +152,9 @@ private[stream] final class Dispatcher[R, E, A](
    * Each worker reads the seed before it counts itself, so the `n`-th increment
    * comes after all `n` reads and no worker can find the reference cleared.
    */
-  private[this] val start: ZIO[R, Nothing, Unit] = ZIO.suspendSucceed {
+  private[this] val workerBody: ZIO[R, Nothing, Unit] = ZIO.suspendSucceed {
     val seed = seedRef.get
-    if (started.incrementAndGet() == n) seedRef.set(null)
+    if (startedWorkers.incrementAndGet() == n) seedRef.set(null)
     loop(seed)
   }
 
@@ -172,12 +172,12 @@ private[stream] final class Dispatcher[R, E, A](
    * consuming the stream and still report success. At `n == 1`, which does not
    * fork, the same defect would fail the run instead. Handling it once per
    * worker sends it through `onError` like any other failure of `f`, at no
-   * per-element cost, and the fold frame it adds holds only `start`, which
+   * per-element cost, and the fold frame it adds holds only `workerBody`, which
    * does not reach the seed. External interruption never reaches the handler,
    * since the runtime skips fold handlers on an interrupted fiber, and
    * `onError` ignores interruption-only causes regardless.
    */
-  def run: ZIO[R, Nothing, Unit] = WorkerPool.replicate(n)(start.catchAllCause(onError))
+  def run: ZIO[R, Nothing, Unit] = WorkerPool.replicate(n)(workerBody.catchAllCause(onError))
 
   /**
    * The seed round until every worker has started, then `null`. Nothing in a
@@ -187,14 +187,14 @@ private[stream] final class Dispatcher[R, E, A](
 
   /**
    * Publishes the round the fetcher just built to the workers awaiting `round`,
-   * and makes it [[current]]. That write happens when `publish` is called, before
+   * and makes it [[latest]]. That write happens when `publish` is called, before
    * the returned effect completes the promise. `Promise#done` is the public
    * equivalent of the internal `promise.unsafe.done`: the same `completeWith`.
    * Its `Boolean` is left for the caller to discard, which every caller's `*>`
    * already does without the `map` node a `.unit` here would add per round.
    */
   private def publish(round: Round[A], next: Round[A]): ZIO[Any, Nothing, Boolean] = {
-    current = next
+    latest = next
     round.next.done(Exit.succeed(next))
   }
 
@@ -206,7 +206,7 @@ private[stream] final class Dispatcher[R, E, A](
    * It runs before the fetch rather than after the publish. The fetch can wait
    * on the producer for as long as the stream is idle, and all that time the
    * drained round is reachable from the fetcher's continuation and from
-   * [[current]]. Released only after the publish, its chunk, a fusion of up to
+   * [[latest]]. Released only after the publish, its chunk, a fusion of up to
    * `bufferSize` of the stream's chunks, stayed alive until the next chunk
    * arrived: 400 to 1600 elements after a 16-chunk burst of 100, against the
    * 100 of the chunk the stream machinery itself keeps.
@@ -217,16 +217,16 @@ private[stream] final class Dispatcher[R, E, A](
    * either the chunk with its cursor past the end, or null; both send it to the
    * await branch.
    */
-  private def release(round: Round[A]): Unit =
+  private def releaseChunk(round: Round[A]): Unit =
     round.chunk = null.asInstanceOf[Chunk[A]]
 
   /**
    * The continuation after an `f` that did not complete synchronously and ended
    * its claim. Built once per run: it needs no per-element state, since it
-   * resumes from [[current]] and `loop`'s trampoline budget starts afresh after
+   * resumes from [[latest]] and `loop`'s trampoline budget starts afresh after
    * any suspension.
    */
-  private[this] val resume: Any => ZIO[R, Nothing, Unit] = _ => loop(current)
+  private[this] val resume: Any => ZIO[R, Nothing, Unit] = _ => loop(latest)
 
   /** `loop` as a function value, so awaiting a round does not allocate one. */
   private[this] val loopFn: Round[A] => ZIO[R, Nothing, Unit] = round => loop(round)
@@ -240,7 +240,7 @@ private[stream] final class Dispatcher[R, E, A](
    * `chunk` is passed in rather than re-read from the round, which the fetcher
    * may release at any time after the boundary; this range was reserved before
    * that could happen. The loop is bounded by the claim, which
-   * `Round.MaxStride` caps, so it needs no trampoline budget of its own.
+   * `Round.MaxClaimSize` caps, so it needs no trampoline budget of its own.
    */
   private def runClaim(chunk: Chunk[A], from: Int, until: Int): ZIO[R, Nothing, Unit] = {
     var j = from
@@ -253,7 +253,7 @@ private[stream] final class Dispatcher[R, E, A](
         case _ => return continueAfter(effect, chunk, j, until)
       }
     }
-    loop(current)
+    loop(latest)
   }
 
   /**
@@ -264,33 +264,33 @@ private[stream] final class Dispatcher[R, E, A](
    * that has not returned is reachable for as long as it runs. Capturing `chunk`
    * would keep the whole round's chunk, a fusion of up to `bufferSize` of the
    * stream's chunks, alive behind every hung or slow callback, long after
-   * [[release]]: with 64 workers, one hung callback kept 1697 elements reachable
+   * [[releaseChunk]]: with 64 workers, one hung callback kept 1697 elements reachable
    * against 99 for `mapZIOParUnordered`. So mid-claim it captures a copy of the
-   * rest of the claim, at most `Round.MaxStride - 1` elements. A chunk that
+   * rest of the claim, at most `Round.MaxClaimSize - 1` elements. A chunk that
    * small is kept as is, so a claim copies at most once however often its `f`
    * suspends.
    */
-  private def continueAfter(effect: ZIO[R, E, Any], chunk: Chunk[A], next: Int, until: Int): ZIO[R, Nothing, Unit] =
-    if (next >= until) effect.foldCauseZIO(onError, resume)
-    else if (chunk.length <= Round.MaxStride) effect.foldCauseZIO(onError, _ => runClaim(chunk, next, until))
+  private def continueAfter(effect: ZIO[R, E, Any], chunk: Chunk[A], from: Int, until: Int): ZIO[R, Nothing, Unit] =
+    if (from >= until) effect.foldCauseZIO(onError, resume)
+    else if (chunk.length <= Round.MaxClaimSize) effect.foldCauseZIO(onError, _ => runClaim(chunk, from, until))
     else {
-      val rest = chunk.slice(next, until).materialize
+      val rest = chunk.slice(from, until).materialize
       effect.foldCauseZIO(onError, _ => runClaim(rest, 0, rest.length))
     }
 
   /**
    * Whether this worker is the round's elected fetcher: by `i == length` at
-   * stride 1, and by CAS on `fetching` for a batched round (see
-   * the class doc on why the stride decides).
+   * claim size 1, and by CAS on `fetcherElected` for a batched round (see
+   * the class doc on why the claim size decides).
    *
    * `chunk ne null` keeps a released round from re-electing: a worker that
    * re-enters `loop` on one goes to the await branch instead. For a batched
-   * round the CAS would refuse it too, since `release` runs only once the winner
+   * round the CAS would refuse it too, since `releaseChunk` runs only once the winner
    * has been elected, so the guard is belt and braces there and the sole
-   * protection at stride 1.
+   * protection at claim size 1.
    */
-  private def isFetcher(round: Round[A], chunk: Chunk[A], i: Int, length: Int, stride: Int): Boolean =
-    (chunk ne null) && (if (stride == 1) i == length else round.fetching.compareAndSet(false, true))
+  private def isFetcher(round: Round[A], chunk: Chunk[A], i: Int, length: Int, claimSize: Int): Boolean =
+    (chunk ne null) && (if (claimSize == 1) i == length else round.fetcherElected.compareAndSet(false, true))
 
   /**
    * Releases the drained round, then pulls the next `Take` and publishes the
@@ -299,7 +299,7 @@ private[stream] final class Dispatcher[R, E, A](
    * data `Take` becomes the next round, which this worker then loops onto.
    */
   private def fetchAndPublish(round: Round[A]): ZIO[R, Nothing, Unit] = {
-    release(round)
+    releaseChunk(round)
     fetch.flatMap { take =>
       take.exit.foldExit(
         cause =>
@@ -341,21 +341,21 @@ private[stream] final class Dispatcher[R, E, A](
    * the closure, the recursion and the interpreter round trip together.
    */
   private def loop(round: Round[A]): ZIO[R, Nothing, Unit] = {
-    var budget = Dispatcher.TrampolineEvery
+    var budget = Dispatcher.YieldEvery
     while (true) {
-      if (round.terminal) return Exit.unit
+      if (round.isTerminal) return Exit.unit
       // Read the chunk once: the fetcher may null the field at any moment, and
       // the length checks and element reads must agree with each other.
       val chunk = round.chunk
       val length = if (chunk eq null) 0 else chunk.length
-      val stride = round.stride
-      // `getAndIncrement` rather than `getAndAdd(1)` at stride 1: it is a JIT
-      // intrinsic with a dedicated code path, and stride 1 is the hot regime
+      val claimSize = round.claimSize
+      // `getAndIncrement` rather than `getAndAdd(1)` at claim size 1: it is a JIT
+      // intrinsic with a dedicated code path, and claim size 1 is the hot regime
       // whenever `f` is slow enough that a round is not batched.
-      val i = if (stride == 1) round.cursor.getAndIncrement() else round.cursor.getAndAdd(stride)
+      val i = if (claimSize == 1) round.cursor.getAndIncrement() else round.cursor.getAndAdd(claimSize)
       if (i >= length)
-        return if (isFetcher(round, chunk, i, length, stride)) fetchAndPublish(round) else awaitNext(round)
-      val until = if (stride == 1) i + 1 else (i + stride) min length
+        return if (isFetcher(round, chunk, i, length, claimSize)) fetchAndPublish(round) else awaitNext(round)
+      val until = if (claimSize == 1) i + 1 else (i + claimSize) min length
       var j = i
       while (j < until) {
         val effect = f(chunk(j))
@@ -380,7 +380,7 @@ private[stream] object Dispatcher {
    * Runs the element-dispatch loop across `n` worker fibers.
    *
    *   - `fetch` pulls the next [[Take]], which becomes the next round; in
-   *     `runForeachPar` it is [[BatchingFetch]]'s, which may fuse several of
+   *     `runForeachPar` it is [[BatchingFetch]]'s `fetch`, which may fuse several of
    *     the stream's chunks into one. It is invoked by whichever worker becomes
    *     the designated fetcher, exactly once per round.
    *   - `f` is the per-element callback; each worker runs at most one `f` at a
@@ -405,7 +405,7 @@ private[stream] object Dispatcher {
    *   - Each worker must make its own first claim when it runs. `loop` claims
    *     from the cursor as soon as it is called, so one evaluated `loop(seed)`
    *     handed to every worker would make each of them the seed's fetcher. The
-   *     workers start from `start`, a suspended effect, which makes that
+   *     workers run `workerBody`, a suspended effect, which makes that
    *     impossible.
    *   - [[WorkerPool]] forks with `fork`, not `forkDaemon`, so the workers are
    *     children of the pool fiber and are interrupted with it when the caller
@@ -429,13 +429,13 @@ private[stream] object Dispatcher {
    * operation boundary, so it would not yield its thread to other fibers and
    * would not notice interruption: a fail-fast teardown would wait for the
    * round. Returning an effect every so often restores both, and costs one
-   * `suspendSucceed` node per `TrampolineEvery` elements.
+   * `suspendSucceed` node per `YieldEvery` elements.
    *
    * This used to bound JVM recursion as well, back when an `Exit` result ran
    * its continuation inline through `Exit#foldCauseZIO`: a single
    * 200,000-element chunk with a no-op `f` overflowed a 512KB stack. `loop` no
    * longer recurses, and `StackSafetySpec` still covers that case.
    */
-  private final val TrampolineEvery = 512
+  private final val YieldEvery = 512
 
 }

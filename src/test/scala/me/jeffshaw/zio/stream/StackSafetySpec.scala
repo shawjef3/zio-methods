@@ -30,7 +30,7 @@ import zio.test._
  * (such as `_ => Exit.unit`) inline, without going back to the ZIO interpreter.
  * If that path ever recursed rather than looping, as it once did through
  * `Exit#foldCauseZIO`, its JVM stack depth would be the length of a round,
- * which neither `Round.MaxStride` nor fusion bounds. Other synchronous effects,
+ * which neither `Round.MaxClaimSize` nor fusion bounds. Other synchronous effects,
  * `ZIO.succeed` among them, are evaluated by the interpreter's own loop and do
  * not recurse, so only an `Exit` result exercises this.
  *
@@ -158,7 +158,7 @@ object StackSafetySpec extends ZIOSpecDefault {
     suite("stack safety")(
       test("a single large chunk with a synchronous f does not overflow") {
         // One chunk, so this is a single round: a recursive loop would be as
-        // deep as the whole 200k rather than anything `MaxStride` bounds.
+        // deep as the whole 200k rather than anything `MaxClaimSize` bounds.
         val chunk = Chunk.fromArray(Array.fill(200000)(1))
         for {
           outcome <- runOnSmallStacks(ZStream.fromChunks(chunk).runForeachPar(4)(_ => Exit.unit))
@@ -190,7 +190,7 @@ object StackSafetySpec extends ZIOSpecDefault {
         } yield assertTrue(outcome == Right(Exit.succeed(Left("boom"))))
       },
       test("a synchronous f runs every element exactly once") {
-        // `loop` hands control back to the interpreter every `TrampolineEvery`
+        // `loop` hands control back to the interpreter every `YieldEvery`
         // elements and then resumes the same round; it must not skip or repeat
         // an element at that boundary. `f` returns an `Exit` so that it takes
         // the inline path the boundary interrupts.

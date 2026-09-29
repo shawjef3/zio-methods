@@ -35,7 +35,7 @@ import me.jeffshaw.zio.stream.BenchmarkUtil._
  * '''serially, on the publishing fiber''', before that fiber can run any `f`.
  * So a round boundary is O(waiters) work on the critical path.
  *
- * A round of `length` elements at stride `s` can occupy at most
+ * A round of `length` elements at claim size `s` can occupy at most
  * `ceil(length / s)` workers. Every worker beyond that is woken, finds the
  * cursor exhausted, and re-parks: a full wake and a fresh `asyncInterrupt`
  * registration to accomplish nothing.

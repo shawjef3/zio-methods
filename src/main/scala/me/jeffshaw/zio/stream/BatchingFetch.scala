@@ -44,7 +44,7 @@ import java.util.concurrent.atomic.AtomicReference
  * successive fetchers are ordered by the round handoff; the [[AtomicReference]]
  * makes that independent of those details.
  *
- * One instance is built per run, and [[effect]] is likewise built once, with
+ * One instance is built per run, and [[fetch]] is likewise built once, with
  * its per-batch continuation: a fetch costs the parked-terminal read, the
  * `takeBetween` and its one `flatMap` node, and the fusing.
  *
@@ -88,7 +88,7 @@ import java.util.concurrent.atomic.AtomicReference
  */
 private[stream] final class BatchingFetch[E, A] private (
   queue: Queue[Take[E, A]],
-  batchMax: Int,
+  maxChunksPerBatch: Int,
   fuseTarget: Int
 ) {
 
@@ -96,7 +96,7 @@ private[stream] final class BatchingFetch[E, A] private (
    * Holds the terminal `Take`'s underlying `Exit` (`Take` is an `AnyVal`, so the
    * reference stores the boxed exit instead). `null` when no terminal is parked.
    */
-  private[this] val pendingTerminal = new AtomicReference[Exit[Option[E], Chunk[A]]](null)
+  private[this] val parkedTerminal = new AtomicReference[Exit[Option[E], Chunk[A]]](null)
 
   /**
    * Splits a batch into the [[Take]] to hand out now and the terminal to park.
@@ -111,19 +111,19 @@ private[stream] final class BatchingFetch[E, A] private (
     if (terminalIndex < 0) BatchingFetch.fuse(takes)
     else if (terminalIndex == 0) takes.head
     else {
-      pendingTerminal.set(takes(terminalIndex).exit)
+      parkedTerminal.set(takes(terminalIndex).exit)
       BatchingFetch.fuse(takes.take(terminalIndex))
     }
   }
 
   /** The parked terminal, or `null` if none. Exposed for testing the park. */
-  private[stream] def parked: Exit[Option[E], Chunk[A]] = pendingTerminal.get
+  private[stream] def parkedTerminalForTesting: Exit[Option[E], Chunk[A]] = parkedTerminal.get
 
   /**
    * The fetch effect handed to [[Dispatcher]]: the parked terminal
    * if there is one, otherwise the next fused batch.
    *
-   * `batchMax` bounds the batch in ''chunks'', but what a round needs is
+   * `maxChunksPerBatch` bounds the batch in ''chunks'', but what a round needs is
    * elements: at one element per chunk the default of 16 yields a 16-element
    * round, the regime measured ~20x slower than 64-element chunks at equal
    * element count. So when the batch holds fewer than `fuseTarget` elements it
@@ -140,15 +140,15 @@ private[stream] final class BatchingFetch[E, A] private (
    * `n = 64`, versus 32 at `n = 4`. At 64- and 512-element chunks every point
    * was flat, the control this needed to pass.
    */
-  private[stream] def effect(implicit trace: Trace): ZIO[Any, Nothing, Take[E, A]] = {
-    // Built once, with `effect`, rather than as a fresh closure every fetch.
+  private[stream] def fetch(implicit trace: Trace): ZIO[Any, Nothing, Take[E, A]] = {
+    // Built once, with `fetch`, rather than as a fresh closure every fetch.
     val onBatch: Chunk[Take[E, A]] => ZIO[Any, Nothing, Take[E, A]] = takes =>
       if (reachesFuseTarget(takes)) Exit.succeed(split(takes))
       else queue.takeAll.map(more => split(if (more.isEmpty) takes else takes ++ more))
     ZIO.suspendSucceed {
-      val parked = pendingTerminal.get
+      val parked = parkedTerminal.get
       if (parked ne null) Exit.succeed(Take(parked))
-      else queue.takeBetween(1, batchMax).flatMap(onBatch)
+      else queue.takeBetween(1, maxChunksPerBatch).flatMap(onBatch)
     }
   }
 
@@ -196,12 +196,12 @@ private[stream] object BatchingFetch {
    * How many elements a fused round should hold before the fetcher stops
    * draining the queue for more.
    *
-   * Matched to `Round.ClaimsPerWorker`: below `n * 8` elements `Round.strideFor`
-   * pins the stride to 1, so a round under this target gets no claim batching at
-   * all. Draining up to it is what lets the stride engage; past it there is
-   * nothing further to win, and `batchMax` still bounds the batch in chunks.
+   * Matched to `Round.ClaimsPerWorker`: below `n * 8` elements `Round.claimSizeFor`
+   * pins the claim size to 1, so a round under this target gets no claim batching at
+   * all. Draining up to it is what lets batched claims engage; past it there is
+   * nothing further to win, and `maxChunksPerBatch` still bounds the batch in chunks.
    */
-  private final val FuseTargetClaimsPerWorker = 8
+  private final val FuseTargetElementsPerWorker = 8
 
   /**
    * Builds the per-run fetcher over `queue`, batching up to `bufferSize` chunks
@@ -215,12 +215,12 @@ private[stream] object BatchingFetch {
       // In `Long` then clamped: `n` is caller-supplied and can be large enough
       // that `n * 8` in `Int` would overflow to a negative target and make
       // every batch look like it had already met it.
-      (n.toLong * FuseTargetClaimsPerWorker min Int.MaxValue.toLong).toInt
+      (n.toLong * FuseTargetElementsPerWorker min Int.MaxValue.toLong).toInt
     )
 
-  /** Builds the per-run fetcher over `queue` and returns its [[BatchingFetch#effect]]. */
-  def effect[E, A](queue: Queue[Take[E, A]], bufferSize: Int, n: Int)(implicit
+  /** Builds the per-run fetcher over `queue` and returns its [[BatchingFetch#fetch]]. */
+  def fetch[E, A](queue: Queue[Take[E, A]], bufferSize: Int, n: Int)(implicit
     trace: Trace
   ): ZIO[Any, Nothing, Take[E, A]] =
-    apply[E, A](queue, bufferSize, n).effect
+    apply[E, A](queue, bufferSize, n).fetch
 }

@@ -45,7 +45,7 @@ object DispatcherSpec extends ZIOSpecDefault {
    * test distinguish "stopped pulling" (the count settles) from "kept pulling"
    * without the harness itself deciding what over-pulling means.
    */
-  private def scriptedFetch[E, A](
+  private def countingScriptedFetch[E, A](
     takes: Chunk[Take[E, A]]
   ): UIO[(ZIO[Any, Nothing, Take[E, A]], UIO[Int])] =
     Ref.make(0).map { calls =>
@@ -55,12 +55,12 @@ object DispatcherSpec extends ZIOSpecDefault {
     }
 
   /**
-   * [[scriptedFetch]] with the call count discarded, for the tests that only
+   * [[countingScriptedFetch]] with the call count discarded, for the tests that only
    * need a fetch to drive. Keeps the two-line tuple destructuring to the tests
    * that actually read the count, where it says something.
    */
   private def scripted[E, A](takes: Chunk[Take[E, A]]): UIO[ZIO[Any, Nothing, Take[E, A]]] =
-    scriptedFetch[E, A](takes).map(_._1)
+    countingScriptedFetch[E, A](takes).map(_._1)
 
   private val noError: Cause[Any] => UIO[Unit] = _ => ZIO.unit
 
@@ -112,7 +112,7 @@ object DispatcherSpec extends ZIOSpecDefault {
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to 100)), Take.end)
         checkAll(Gen.fromIterable(Chunk(2, 16, 128))) { n =>
           for {
-            fetchAndCount <- scriptedFetch[String, Int](script)
+            fetchAndCount <- countingScriptedFetch[String, Int](script)
             (fetch, count) = fetchAndCount
             _ <- runWith(n, fetch)(_ => ZIO.unit)
             calls <- count
@@ -133,7 +133,7 @@ object DispatcherSpec extends ZIOSpecDefault {
           )
         for {
           visited <- Ref.make(Vector.empty[Int])
-          fetchAndCount <- scriptedFetch[String, Int](script)
+          fetchAndCount <- countingScriptedFetch[String, Int](script)
           (fetch, count) = fetchAndCount
           _ <- runWith(16, fetch)(a => visited.update(_ :+ a))
           res <- visited.get
@@ -202,7 +202,7 @@ object DispatcherSpec extends ZIOSpecDefault {
         } yield assertCompletes
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("a chunk large enough to batch claims still keeps all n workers busy") {
-        // The test above has `length == n`, so its stride is 1. This chunk is
+        // The test above has `length == n`, so its claim size is 1. This chunk is
         // large enough for batched claims, which must still reach every worker.
         val n = 16
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to (n * 64))), Take.end)
@@ -220,9 +220,9 @@ object DispatcherSpec extends ZIOSpecDefault {
         } yield assertCompletes
       } @@ TestAspect.jvmOnly @@ nonFlaky(20),
       test("claims partition the chunk at every length/n ratio") {
-        // Different length/n ratios give different strides, including ones where
+        // Different length/n ratios give different claim sizes, including ones where
         // the final claim is short. It also guards batched election: electing by
-        // `i == length` on a stride above 1 elects nobody, which times out here.
+        // `i == length` on a claim size above 1 elects nobody, which times out here.
         checkAll(
           Gen.fromIterable(
             for {
@@ -234,7 +234,7 @@ object DispatcherSpec extends ZIOSpecDefault {
           val script = Chunk(Take.chunk(Chunk.fromIterable(1 to length)), Take.end)
           for {
             counts <- Ref.make(Map.empty[Int, Int])
-            fetchAndCount <- scriptedFetch[String, Int](script)
+            fetchAndCount <- countingScriptedFetch[String, Int](script)
             (fetch, calls) = fetchAndCount
             _ <- runWith(n, fetch)(a => Visits.record(counts, a))
             res <- counts.get

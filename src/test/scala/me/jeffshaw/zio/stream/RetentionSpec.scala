@@ -43,7 +43,7 @@ object RetentionSpec extends ZIOSpecDefault {
    * Follows the round chain from the seed as a run advances. It holds a strong
    * reference only to the newest round it has reached, which pins nothing
    * earlier because the links point forward, and a weak one to every
-   * `SampleEvery`-th round it passes. A sampled round that is still reachable
+   * `RoundSampleEvery`-th round it passes. A sampled round that is still reachable
    * once it is behind the newest is therefore being held by the run.
    *
    * Only the fetcher touches it, and successive fetchers are ordered by the
@@ -66,7 +66,7 @@ object RetentionSpec extends ZIOSpecDefault {
               ZIO.succeed {
                 newest = s.value.asInstanceOf[Round[Int]]
                 passed += 1
-                if (passed % SampleEvery == 0) samples.add(new WeakReference[AnyRef](newest))
+                if (passed % RoundSampleEvery == 0) samples.add(new WeakReference[AnyRef](newest))
               } *> advance
             case _ => ZIO.unit
           }
@@ -95,7 +95,7 @@ object RetentionSpec extends ZIOSpecDefault {
   }
 
   private val RoundCount = 200000
-  private val SampleEvery = 1000
+  private val RoundSampleEvery = 1000
   // The newest sample is the round being fetched from and is live by
   // definition; a worker still parked a round or two behind can hold one more.
   private val RoundSlack = 3
@@ -141,32 +141,32 @@ object RetentionSpec extends ZIOSpecDefault {
     val filler = new Array[Byte](1024)
   }
 
-  private val total = 20000
-  private val chunkSz = 100
-  private val sampleOf = 100
-  private val blockAt = total - 1
-  private val bufferSize = 16
+  private val PayloadCount = 20000
+  private val ChunkSize = 100
+  private val PayloadSampleEvery = 100
+  private val BlockAt = PayloadCount - 1
+  private val BufferSize = 16
 
   // `reachableDuringRun` counts samples rather than payloads, so its bounds are
   // in samples too: one chunk of the source holds this many.
-  private val samplesPerChunk = chunkSz / sampleOf
+  private val SamplesPerChunk = ChunkSize / PayloadSampleEvery
   // Headroom for the stream machinery's own reference to the last chunk it
   // emitted, which the `runForeach` baseline shows as one sample, and for one
   // reference a GC happens to leave uncleared.
-  private val sampleSlack = 2
+  private val SampleSlack = 2
 
   private def source =
     ZStream.unfoldChunk(0) { i =>
-      if (i >= total) None
+      if (i >= PayloadCount) None
       else
         Some(
-          (Chunk.fromIterable((i until (i + chunkSz).min(total)).map(new Payload(_))), i + chunkSz)
+          (Chunk.fromIterable((i until (i + ChunkSize).min(PayloadCount)).map(new Payload(_))), i + ChunkSize)
         )
     }
 
   /**
    * Runs `consume` over the source, blocking on the last element, and reports
-   * how many payloads it sampled, one in every `sampleOf`, and how many of
+   * how many payloads it sampled, one in every `PayloadSampleEvery`, and how many of
    * those are still reachable at that point. Both counts are in samples.
    */
   private def reachableDuringRun(
@@ -177,9 +177,8 @@ object RetentionSpec extends ZIOSpecDefault {
       blocked <- Promise.make[Nothing, Unit]
       release <- Promise.make[Nothing, Unit]
       f = (p: Payload) =>
-        if (p.id == blockAt) blocked.succeed(()) *> release.await
-        else if (p.id % sampleOf == 0) refs.update(new WeakReference(p) :: _)
-        else ZIO.unit
+        if (p.id == BlockAt) blocked.succeed(()) *> release.await
+        else refs.update(new WeakReference(p) :: _).when(p.id % PayloadSampleEvery == 0)
       fiber <- consume(f).fork
       _ <- blocked.await
       // Let the remaining workers finish everything they can.
@@ -221,7 +220,7 @@ object RetentionSpec extends ZIOSpecDefault {
    * claim is what the hung callback's continuation has to keep.
    */
   private def reachableWithHungCallback(consume: (Payload => UIO[Any]) => ZIO[Any, Any, Any]): UIO[Int] = {
-    val hangAt = total / 2
+    val hangAt = PayloadCount / 2
     for {
       refs <- ZIO.succeed(new ConcurrentLinkedQueue[WeakReference[Payload]])
       hung <- Promise.make[Nothing, Unit]
@@ -230,21 +229,20 @@ object RetentionSpec extends ZIOSpecDefault {
       f = (p: Payload) => {
         refs.add(new WeakReference(p))
         if (p.id == hangAt) hung.succeed(()) *> release.await
-        else if (p.id == blockAt) last.succeed(()) *> release.await
-        else ZIO.unit
+        else (last.succeed(()) *> release.await).when(p.id == BlockAt)
       }
       fiber <- consume(f).fork
       _ <- hung.await *> last.await
       _ <- ZIO.sleep(300.millis)
-      alive <- ZIO.succeed(countReachable(refs, Set(hangAt, blockAt)))
+      alive <- ZIO.succeed(countReachable(refs, Set(hangAt, BlockAt)))
       _ <- release.succeed(()) *> fiber.interrupt
     } yield alive
   }
 
-  private val idleAfter = 16
+  private val IdleAfter = 16
 
   /**
-   * Runs `consume` over a stream that emits `idleAfter` chunks as fast as it
+   * Runs `consume` over a stream that emits `IdleAfter` chunks as fast as it
    * can and then emits nothing more, and reports how many payloads are
    * reachable once every element emitted has been processed.
    */
@@ -254,12 +252,12 @@ object RetentionSpec extends ZIOSpecDefault {
       processed <- Ref.make(0)
       all <- Promise.make[Nothing, Unit]
       stream = ZStream.unfoldChunk(0) { k =>
-        if (k >= idleAfter) None
-        else Some((Chunk.fromIterable((k * chunkSz until (k + 1) * chunkSz).map(new Payload(_))), k + 1))
+        if (k >= IdleAfter) None
+        else Some((Chunk.fromIterable((k * ChunkSize until (k + 1) * ChunkSize).map(new Payload(_))), k + 1))
       } ++ ZStream.never
       f = (p: Payload) =>
         ZIO.succeed(refs.add(new WeakReference(p))) *>
-          processed.updateAndGet(_ + 1).flatMap(c => all.succeed(()).when(c == idleAfter * chunkSz))
+          processed.updateAndGet(_ + 1).flatMap(c => all.succeed(()).when(c == IdleAfter * ChunkSize))
       fiber <- consume(stream, f).fork
       _ <- all.await
       _ <- ZIO.sleep(300.millis)
@@ -271,7 +269,7 @@ object RetentionSpec extends ZIOSpecDefault {
     suite("retention")(
       test("a drained chunk is not retained for the life of the run") {
         for {
-          res <- reachableDuringRun(f => source.runForeachPar(64, bufferSize)(f))
+          res <- reachableDuringRun(f => source.runForeachPar(64, BufferSize)(f))
           (sampled, alive) = res
           _ <- Console.printLine(s"[retention] drained n=64 alive=$alive of $sampled")
         } yield assertTrue(
@@ -279,32 +277,32 @@ object RetentionSpec extends ZIOSpecDefault {
           // Every other worker has finished, so the round holding the blocked
           // element has been released; at most the chunk being dispatched may
           // still be reachable.
-          alive <= samplesPerChunk + sampleSlack
+          alive <= SamplesPerChunk + SampleSlack
         )
       } @@ TestAspect.withLiveClock @@ TestAspect.timeout(60.seconds),
       test("retention does not grow with n") {
         for {
-          one <- reachableDuringRun(f => source.runForeachPar(1, bufferSize)(f))
-          many <- reachableDuringRun(f => source.runForeachPar(512, bufferSize)(f))
+          one <- reachableDuringRun(f => source.runForeachPar(1, BufferSize)(f))
+          many <- reachableDuringRun(f => source.runForeachPar(512, BufferSize)(f))
           _ <- Console.printLine(s"[retention] grow n=1 alive=${one._2} n=512 alive=${many._2} of ${many._1}")
         } yield assertTrue(
           // The sole worker is blocked inside the last round, so nothing
           // releases it: a fused round of up to `bufferSize` chunks stays
           // reachable, but no more than that.
-          one._2 <= bufferSize * samplesPerChunk + sampleSlack,
-          many._2 <= samplesPerChunk + sampleSlack
+          one._2 <= BufferSize * SamplesPerChunk + SampleSlack,
+          many._2 <= SamplesPerChunk + SampleSlack
         )
       } @@ TestAspect.withLiveClock @@ TestAspect.timeout(60.seconds),
       test("matches the retention of the combinators it replaces") {
         for {
           seq <- reachableDuringRun(f => source.runForeach(f))
           par <- reachableDuringRun(f => source.mapZIOParUnordered(64)(p => f(p)).runDrain)
-          ours <- reachableDuringRun(f => source.runForeachPar(64, bufferSize)(f))
+          ours <- reachableDuringRun(f => source.runForeachPar(64, BufferSize)(f))
           _ <- Console.printLine(
             s"[retention] runForeach=${seq._2} mapZIOParUnordered=${par._2} runForeachPar=${ours._2} (of ${ours._1} sampled)"
           )
           // Not worse than the baselines by more than a chunk.
-        } yield assertTrue(ours._2 <= seq._2 + samplesPerChunk, ours._2 <= par._2 + samplesPerChunk)
+        } yield assertTrue(ours._2 <= seq._2 + SamplesPerChunk, ours._2 <= par._2 + SamplesPerChunk)
       } @@ TestAspect.withLiveClock @@ TestAspect.timeout(60.seconds),
       test("a long run does not retain the rounds it has finished with") {
         // One-element rounds, so there is one round per element. If anything
@@ -316,7 +314,7 @@ object RetentionSpec extends ZIOSpecDefault {
           for {
             res <- roundsReachableDuringRun(n)
             (sampled, alive) = res
-          } yield assertTrue(sampled == RoundCount / SampleEvery, alive <= RoundSlack)
+          } yield assertTrue(sampled == RoundCount / RoundSampleEvery, alive <= RoundSlack)
         }
       } @@ TestAspect.timeout(120.seconds),
       test("a slow callback does not retain the rounds published while it runs") {
@@ -326,7 +324,7 @@ object RetentionSpec extends ZIOSpecDefault {
           for {
             res <- roundsReachableDuringRun(n, blockFirst = true)
             (sampled, alive) = res
-          } yield assertTrue(sampled == RoundCount / SampleEvery, alive <= RoundSlack)
+          } yield assertTrue(sampled == RoundCount / RoundSampleEvery, alive <= RoundSlack)
         }
       } @@ TestAspect.timeout(120.seconds),
       test("the round measurement sees a pinned seed") {
@@ -337,7 +335,7 @@ object RetentionSpec extends ZIOSpecDefault {
         for {
           res <- roundsReachableDuringRun(1, pinSeed = true)
           (sampled, alive) = res
-        } yield assertTrue(sampled == RoundCount / SampleEvery, alive == sampled)
+        } yield assertTrue(sampled == RoundCount / RoundSampleEvery, alive == sampled)
       } @@ TestAspect.timeout(120.seconds),
       test("a callback hung inside a batched claim retains only its claim") {
         // See `Dispatcher.continueAfter`. `n = 512` never batches a round this
@@ -345,15 +343,15 @@ object RetentionSpec extends ZIOSpecDefault {
         // comparison.
         for {
           par <- reachableWithHungCallback(f => source.mapZIOParUnordered(64)(f).runDrain)
-          unbatched <- reachableWithHungCallback(f => source.runForeachPar(512, bufferSize)(f))
-          batched <- reachableWithHungCallback(f => source.runForeachPar(64, bufferSize)(f))
-          few <- reachableWithHungCallback(f => source.runForeachPar(8, bufferSize)(f))
+          unbatched <- reachableWithHungCallback(f => source.runForeachPar(512, BufferSize)(f))
+          batched <- reachableWithHungCallback(f => source.runForeachPar(64, BufferSize)(f))
+          few <- reachableWithHungCallback(f => source.runForeachPar(8, BufferSize)(f))
           _ <- Console.printLine(
             s"[retention] hung callback: mapZIOParUnordered=$par runForeachPar(512)=$unbatched runForeachPar(64)=$batched runForeachPar(8)=$few"
           )
           // One chunk of slack for the round being dispatched when measured,
           // and one for the chunk the stream machinery holds.
-        } yield assertTrue(batched <= par + 2 * chunkSz, few <= par + 2 * chunkSz, unbatched <= par + 2 * chunkSz)
+        } yield assertTrue(batched <= par + 2 * ChunkSize, few <= par + 2 * ChunkSize, unbatched <= par + 2 * ChunkSize)
       } @@ TestAspect.withLiveClock @@ TestAspect.timeout(120.seconds),
       test("an idle stream does not keep the drained round") {
         // See `Dispatcher.release`. The baseline is `runForeach`, which keeps
@@ -361,10 +359,10 @@ object RetentionSpec extends ZIOSpecDefault {
         // release.
         for {
           seq <- reachableWhileIdle((s, f) => s.runForeach(f))
-          four <- reachableWhileIdle((s, f) => s.runForeachPar(4, bufferSize)(f))
-          many <- reachableWhileIdle((s, f) => s.runForeachPar(64, bufferSize)(f))
+          four <- reachableWhileIdle((s, f) => s.runForeachPar(4, BufferSize)(f))
+          many <- reachableWhileIdle((s, f) => s.runForeachPar(64, BufferSize)(f))
           _ <- Console.printLine(s"[retention] idle: runForeach=$seq runForeachPar(4)=$four runForeachPar(64)=$many")
-        } yield assertTrue(four <= seq + chunkSz / 2, many <= seq + chunkSz / 2)
+        } yield assertTrue(four <= seq + ChunkSize / 2, many <= seq + ChunkSize / 2)
       } @@ TestAspect.withLiveClock @@ TestAspect.timeout(120.seconds)
     )
 }

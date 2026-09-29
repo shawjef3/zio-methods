@@ -85,15 +85,15 @@ package object stream {
       trace: Trace
     ): ZIO[R1, E1, Unit] =
       ZIO.suspendSucceed {
-        val nn = n
+        val workers = n
         // Clamped once, for the queue and the fetcher alike: `Queue.bounded`
         // dies on a non-positive capacity.
-        val bufferSizeV = bufferSize max 1
-        if (nn <= 0) self.runForeach(f)
+        val bufferChunks = bufferSize max 1
+        if (workers <= 0) self.runForeach(f)
         else
           ZIO.scopedWith { scope =>
             for {
-              queue <- Queue.bounded[Take[E, A]](bufferSizeV)
+              queue <- Queue.bounded[Take[E, A]](bufferChunks)
               _ <- scope.addFinalizer(queue.shutdown)
               childScope <- scope.fork
               fiberId <- ZIO.fiberId
@@ -110,7 +110,7 @@ package object stream {
                 .foldCauseZIO(cause => queue.offer(Take.failCause(cause)), _ => queue.offer(Take.end))
                 .forkIn(childScope)
               workerFiber <- Dispatcher
-                .run[R1, E1, A](nn, BatchingFetch.effect[E, A](queue, bufferSizeV, nn), f, failures.record)
+                .run[R1, E1, A](workers, BatchingFetch.fetch[E, A](queue, bufferChunks, workers), f, failures.record)
                 .forkIn(childScope)
               // Whichever comes first, the workers finishing or a recorded
               // failure; closing the scope then interrupts whatever still runs.

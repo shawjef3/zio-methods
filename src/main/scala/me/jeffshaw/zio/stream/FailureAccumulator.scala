@@ -63,8 +63,8 @@ import java.util.concurrent.atomic.AtomicReference
  * documented on [[Dispatcher.run]].
  */
 private[stream] final class FailureAccumulator[E] private (
-  private[this] val errorSignal: Promise[Nothing, Unit],
-  private[this] val failure: AtomicReference[Cause[E]]
+  private[this] val failedSignal: Promise[Nothing, Unit],
+  private[this] val accumulatedCause: AtomicReference[Cause[E]]
 )(implicit trace: Trace) {
 
   /**
@@ -82,12 +82,12 @@ private[stream] final class FailureAccumulator[E] private (
    */
   val record: Cause[E] => ZIO[Any, Nothing, Unit] =
     (cause: Cause[E]) =>
-      ZIO.succeed(failure.getAndUpdate(_ && cause)).unless(cause.isInterruptedOnly) *>
-        errorSignal.done(Exit.unit).unit
+      ZIO.succeed(accumulatedCause.getAndUpdate(_ && cause)).unless(cause.isInterruptedOnly) *>
+        failedSignal.done(Exit.unit).unit
 
   /** Completes once the run has failed, so callers can stop the workers. */
   def await: ZIO[Any, Nothing, Unit] =
-    errorSignal.await
+    failedSignal.await
 
   /**
    * The run's outcome, read as one value.
@@ -98,7 +98,7 @@ private[stream] final class FailureAccumulator[E] private (
    * recorded", never "did not fail".
    */
   def result: ZIO[Any, Nothing, Exit[E, Unit]] =
-    errorSignal.isDone.map(errored => if (errored) Exit.failCause(failure.get) else Exit.unit)
+    failedSignal.isDone.map(errored => if (errored) Exit.failCause(accumulatedCause.get) else Exit.unit)
 }
 
 private[stream] object FailureAccumulator {

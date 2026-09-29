@@ -116,14 +116,14 @@ private[stream] object WorkerPool {
     n match {
       case 0 => Exit.unit
       case 1 => worker.unit
-      case size =>
+      case workers =>
         ZIO.uninterruptibleMask { restore =>
           Promise.make[Nothing, Unit].flatMap { allDone =>
-            val remaining = new AtomicInteger(size)
-            val signalLast = allDone.done(Exit.unit).when(remaining.decrementAndGet() == 0)
+            val remaining = new AtomicInteger(workers)
+            val signalIfLast = allDone.done(Exit.unit).when(remaining.decrementAndGet() == 0)
 
-            ZIO.foreachDiscard(0 until size) { _ =>
-              restore(worker).ensuring(signalLast).fork
+            ZIO.foreachDiscard(0 until workers) { _ =>
+              restore(worker).ensuring(signalIfLast).fork
             } *>
               restore(allDone.await)
           }
