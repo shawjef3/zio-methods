@@ -184,7 +184,7 @@ object BatchingFetchSpec extends ZIOSpecDefault {
             for {
               b <- queuedThenTerminal(n, Take.end)
               counts <- Ref.make(Map.empty[Int, Int])
-              _ <- ChunkCursorDistributor
+              _ <- Dispatcher
                 .run[Any, String, String, Int](n, b.effect, a => countVisit(counts, a), _ => ZIO.unit)
               res <- counts.get
             } yield assertTrue(b.parked ne null, res.size == QueuedElements, res.values.forall(_ == 1))
@@ -196,7 +196,7 @@ object BatchingFetchSpec extends ZIOSpecDefault {
               b <- queuedThenTerminal(n, Take.fail("boom"))
               counts <- Ref.make(Map.empty[Int, Int])
               causes <- Ref.make(Vector.empty[Cause[String]])
-              _ <- ChunkCursorDistributor
+              _ <- Dispatcher
                 .run[Any, String, String, Int](n, b.effect, a => countVisit(counts, a), c => causes.update(_ :+ c))
               res <- counts.get
               reported <- causes.get

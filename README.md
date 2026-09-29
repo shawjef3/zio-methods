@@ -11,7 +11,7 @@ ZIO fork rather than merged upstream. Depends on `dev.zio %% zio-streams %
   to `n` invocations of `f` concurrently, without emitting results downstream.
   Semantics match `mapZIOParUnordered`: up to `n` concurrent, unordered, results
   discarded, first failure interrupts the rest and fails fast.
-- `ChunkCursorDistributor`: the chunk-transport / element-dispatch engine
+- `Dispatcher`: the chunk-transport / element-dispatch engine
   behind `runForeachPar`.
 
 ## Which combinator do I want?

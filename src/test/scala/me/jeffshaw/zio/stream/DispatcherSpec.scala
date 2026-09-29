@@ -23,7 +23,7 @@ import zio.test.Assertion._
 import zio.test.TestAspect.nonFlaky
 
 /**
- * Tests [[ChunkCursorDistributor]] directly, driving it with scripted `fetch`
+ * Tests [[Dispatcher]] directly, driving it with scripted `fetch`
  * sequences that `runForeachPar` never produces.
  *
  * `runForeachPar` always supplies a well-behaved queue-backed `fetch` and wraps
@@ -34,7 +34,7 @@ import zio.test.TestAspect.nonFlaky
  * Here `run` is used bare, so convergence is exactly "the returned effect
  * completes".
  */
-object ChunkCursorDistributorSpec extends ZIOSpecDefault {
+object DispatcherSpec extends ZIOSpecDefault {
 
   /**
    * A `fetch` that yields `takes` in order and then repeats the final element
@@ -75,10 +75,10 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
     f: Int => IO[String, Any],
     onError: Cause[String] => UIO[Unit] = noError
   ): UIO[Unit] =
-    ChunkCursorDistributor.run[Any, String, String, Int](n, fetch, f, onError)
+    Dispatcher.run[Any, String, String, Int](n, fetch, f, onError)
 
   def spec =
-    suite("ChunkCursorDistributor")(
+    suite("Dispatcher")(
       test("every worker converges when the first fetch is terminal") {
         // The seed round is already exhausted, so the very first fetch returns
         // end-of-stream and no data round is ever published. Every worker must
@@ -108,7 +108,7 @@ object ChunkCursorDistributorSpec extends ZIOSpecDefault {
         // With one chunk plus a terminal, a correct run pulls exactly twice
         // regardless of n. A double election pulls more, and so does starting
         // every worker from one pre-built `loop(seed)`: see "Starting the
-        // workers" on `ChunkCursorDistributor.run`.
+        // workers" on `Dispatcher.run`.
         val script = Chunk(Take.chunk(Chunk.fromIterable(1 to 100)), Take.end)
         checkAll(Gen.fromIterable(Chunk(2, 16, 128))) { n =>
           for {

@@ -23,9 +23,78 @@ import zio.stacktracer.TracingImplicits.disableAutoTrace
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
 /**
- * The dispatch loop for one run, holding the state it is parameterized by.
+ * Dispatches the elements of chunk-granular [[Take]]s to a pool of worker fibers
+ * at element granularity, without a chunk boundary barrier.
  *
- * Allocated once per [[ChunkCursorDistributor.run]] and shared by every worker.
+ * This is the transport/dispatch split that powers `runForeachPar`: chunks are
+ * moved cheaply through the queue (one box per chunk, not per element), but every
+ * worker claims individual elements out of the current chunk via a shared atomic
+ * cursor, so any number of workers can be busy on the same chunk. In particular a
+ * single chunk of `>= n` elements keeps all `n` workers busy, the failure mode
+ * that a whole-chunk-per-worker design suffers from.
+ *
+ * ==Protocol==
+ *
+ * A [[Round]] holds the current chunk, an [[AtomicInteger]] cursor, a `stride`,
+ * and a `Promise` for the next round. A worker reads the current round and
+ * claims a contiguous range of elements with `i = cursor.getAndAdd(stride)`:
+ *
+ *   - `i < chunk.length`: run `f` over `[i, min(i + stride, length))`, one
+ *     element after another without returning to the cursor, then loop on the
+ *     same round.
+ *   - `i >= chunk.length`: the round is exhausted, and exactly one worker here is
+ *     elected the ''designated fetcher''. It pulls the next [[Take]] from `fetch`
+ *     and publishes the resulting round via `next`. For a data round it then
+ *     loops on it; for a terminal round it returns instead (reporting the cause
+ *     first, if the terminal is a failure), so it never re-observes the terminal
+ *     it just published.
+ *   - `i >= chunk.length` and not elected: another worker is fetching; await
+ *     `next`, then loop on the round it published.
+ *
+ * ==Stride==
+ *
+ * A stride above 1 amortizes the cursor's atomic operation over several
+ * elements, which is what the dispatch loop's cost is dominated by once `f` is
+ * cheap. It is derived per round from `length / (n * ClaimsPerWorker)`, so it
+ * engages only for rounds far larger than `n` and always leaves every worker
+ * several claims, so the load balance a shared cursor exists to provide is
+ * preserved, and a chunk of `>= n` elements still reaches all `n` workers.
+ * Below that threshold the stride is 1 and dispatch is exactly per-element.
+ *
+ * The stride also decides how the fetcher is elected. At stride 1 the bases are
+ * consecutive, so exactly one worker sees `i == length` and that test elects it
+ * with no extra atomic. A larger stride makes the bases skip, so none need land
+ * on `length` at all and the same test would elect nobody and hang the run;
+ * those rounds elect by CAS on `fetching` instead, which costs one atomic per
+ * round on rounds that are by construction large.
+ *
+ * A terminal [[Take]] (end-of-stream or failure) yields a ''terminal round''.
+ * Any worker reaching one stops, because `loop` checks `round.terminal` before
+ * touching the cursor: the worker that published it loops onto it and returns,
+ * and every worker awaiting the *previous* round's `next` receives it and hits
+ * the same check. A terminal round's own `next` and cursor are therefore never
+ * read, and are left null. This makes every worker converge to termination
+ * without any worker blocking on a promise that nobody will complete.
+ *
+ * A terminal round carries no cause. The cause of a failing terminal is reported
+ * to `onError` once, by the fetcher that pulled it, so a single upstream failure
+ * produces a single cause however large `n` is, matching
+ * [[zio.stream.ZChannel#mapOutZIOParUnordered]], where the lone pull loop plays
+ * the same role.
+ *
+ * ==Memory visibility==
+ *
+ * A non-fetcher worker learns of a new round only by awaiting `next`, and the
+ * fetcher completes `next` only after fully constructing the round. Promise
+ * completion/await establishes a happens-before edge, so every field the fetcher
+ * wrote (chunk contents, the fresh cursor, the fresh `next` promise) is visible
+ * to awaiters. Within a round, `cursor` is an `AtomicInteger`, so element claims
+ * are linearized: the claimed ranges partition `[0, length)`, so no index is
+ * handed out twice and none is skipped.
+ *
+ * ==This class==
+ *
+ * One instance per run, built by [[Dispatcher.run]] and shared by every worker.
  * Holding `n`, `fetch`, `f` and `onError` as fields keeps them off the loop's
  * argument lists: as nested defs they were lifted into every call, including
  * the per-element ones. They are immutable and only read, so the sharing needs
@@ -210,7 +279,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   /**
    * Whether this worker is the round's elected fetcher: by `i == length` at
    * stride 1, and by CAS on `fetching` for a batched round (see
-   * [[ChunkCursorDistributor]] on why the stride decides).
+   * the class doc on why the stride decides).
    *
    * `chunk ne null` keeps a released round from re-electing: a worker that
    * re-enters `loop` on one goes to the await branch instead. For a batched
@@ -304,6 +373,48 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
 }
 
 private[stream] object Dispatcher {
+
+  /**
+   * Runs the element-dispatch loop across `n` worker fibers.
+   *
+   *   - `fetch` pulls the next chunk-granular [[Take]] (typically a `Queue#take`
+   *     or a channel pull). It is invoked by whichever worker becomes the
+   *     designated fetcher, exactly once per chunk.
+   *   - `f` is the per-element callback; each worker runs at most one `f` at a
+   *     time, so global concurrency is bounded by `n`.
+   *   - `onError` is invoked to record a cause; recording must be
+   *     idempotent/accumulating. Each distinct failure is reported exactly once:
+   *     a failure from `f` by the worker that ran it, and a failing terminal by
+   *     the fetcher that pulled it. Workers that merely observe the resulting
+   *     terminal round do not re-report it, so one upstream failure yields one
+   *     cause regardless of `n`. Fail-fast interruption of in-flight `f`
+   *     invocations is the caller's responsibility, via scope interruption.
+   *
+   * The returned effect completes when every worker has observed a terminal
+   * round.
+   *
+   * ==Starting the workers==
+   *
+   * All `n` workers begin on one shared seed round, and the election on it is
+   * correct whenever each worker arrives. Two things about starting them do
+   * matter:
+   *
+   *   - Each worker must make its own first claim when it runs. `loop` claims
+   *     from the cursor as soon as it is called, so one evaluated `loop(seed)`
+   *     handed to every worker would make each of them the seed's fetcher. The
+   *     workers start from `start`, a suspended effect, which makes that
+   *     impossible.
+   *   - [[WorkerPool]] forks with `fork`, not `forkDaemon`, so the workers are
+   *     children of the pool fiber and are interrupted with it when the caller
+   *     closes the scope. Daemon workers would outlive a fail-fast teardown.
+   */
+  def run[R, E <: E1, E1, A](
+    n: Int,
+    fetch: ZIO[R, Nothing, Take[E, A]],
+    f: A => ZIO[R, E1, Any],
+    onError: Cause[E1] => ZIO[R, Nothing, Unit]
+  )(implicit trace: Trace): ZIO[R, Nothing, Unit] =
+    ZIO.suspendSucceed(new Dispatcher[R, E, E1, A](n, fetch, f, onError).run)
 
   /**
    * How many elements whose `f` completed synchronously a worker may run in

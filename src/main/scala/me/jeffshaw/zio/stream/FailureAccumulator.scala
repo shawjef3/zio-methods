@@ -60,7 +60,7 @@ import java.util.concurrent.atomic.AtomicReference
  * update site. `RunForeachParSpec`'s "both concurrent failures are reachable in
  * one exit" is what actually guards it. Nor can it compel the dispatcher to
  * invoke [[record]] on every failure path; that stays the caller's contract,
- * documented on [[ChunkCursorDistributor.run]].
+ * documented on [[Dispatcher.run]].
  */
 private[stream] final class FailureAccumulator[E] private (
   private[this] val errorSignal: Promise[Nothing, Unit],
@@ -70,7 +70,7 @@ private[stream] final class FailureAccumulator[E] private (
   /**
    * Records a cause and fires the fail-fast signal, in that order.
    *
-   * Built once per run and handed to [[ChunkCursorDistributor.run]] as its
+   * Built once per run and handed to [[Dispatcher.run]] as its
    * `onError`, where it is captured as the error continuation of the
    * per-element fold. It must therefore stay a single pre-built function value:
    * a method would allocate a fresh closure at every capture site.

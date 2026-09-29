@@ -50,7 +50,7 @@ private[stream] final class Round[E, A](
   /**
    * Elects the round's single designated fetcher when `stride > 1`: the first
    * worker to find the cursor at or past the end wins it by CAS.
-   * [[ChunkCursorDistributor]] explains why only batched rounds need it.
+   * [[Dispatcher]] explains why only batched rounds need it.
    *
    * `null` for a stride-1 round, where `i == length` elects for free, so the
    * flag is neither allocated nor read. That keeps a slow-`f` run, where every

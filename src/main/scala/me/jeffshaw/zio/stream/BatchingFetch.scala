@@ -120,7 +120,7 @@ private[stream] final class BatchingFetch[E, A] private (
   private[stream] def parked: Exit[Option[E], Chunk[A]] = pendingTerminal.get
 
   /**
-   * The fetch effect handed to [[ChunkCursorDistributor]]: the parked terminal
+   * The fetch effect handed to [[Dispatcher]]: the parked terminal
    * if there is one, otherwise the next fused batch.
    *
    * `batchMax` bounds the batch in ''chunks'', but what a round needs is

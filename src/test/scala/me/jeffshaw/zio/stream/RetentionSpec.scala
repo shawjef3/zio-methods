@@ -104,7 +104,7 @@ object RetentionSpec extends ZIOSpecDefault {
    * Runs a [[Dispatcher]] over `RoundCount` one-element rounds and, from inside
    * the final fetch, reports how many sampled rounds are still reachable.
    *
-   * The dispatcher is built here rather than through `ChunkCursorDistributor`
+   * The dispatcher is built here rather than through `Dispatcher.run`
    * only so the seed can be read before the workers start; `run` is the same
    * one production uses. The seed goes straight into the chaser, never into a
    * local that a closure could capture and keep alive. `pinSeed` holds it for
