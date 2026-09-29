@@ -1,3 +1,5 @@
+import ReleaseTransformations._
+
 val Scala212 = "2.12.21"
 val Scala213 = "2.13.18"
 val Scala3 = "3.3.8"
@@ -57,7 +59,28 @@ lazy val zstreamMethods = (project in file("."))
       "dev.zio" %% "zio-test-magnolia" % zioVersion % Test,
       "dev.zio" %% "zio-concurrent" % zioVersion % Test
     ),
-    testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
+    testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
+    // `sbt release` publishes signed artifacts for every Scala version in
+    // `crossScalaVersions`, then uploads and releases them through the Sonatype
+    // Central Portal.
+    releaseCrossBuild := true,
+    releasePublishArtifactsAction := PgpKeys.publishSigned.value,
+    releaseProcess := Seq[ReleaseStep](
+      checkSnapshotDependencies,
+      inquireVersions,
+      runClean,
+      // `Test/testOnly *` rather than `runTest`: under sbt 2, `test` is
+      // `testQuick`, which skips specs it believes are unaffected.
+      ReleaseStep(releaseStepInputTask(Test / testOnly, " *"), enableCrossBuild = true),
+      setReleaseVersion,
+      commitReleaseVersion,
+      tagRelease,
+      publishArtifacts,
+      releaseStepCommand("sonaRelease"),
+      setNextVersion,
+      commitNextVersion,
+      pushChanges
+    )
   )
 
 lazy val benchmarks = (project in file("benchmarks"))
