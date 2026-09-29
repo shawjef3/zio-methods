@@ -19,6 +19,8 @@ package me.jeffshaw.zio.stream
 import zio._
 import zio.test._
 
+import scala.concurrent.ExecutionContext
+
 /**
  * Pins the failure protocol directly, as calls on one accumulator.
  *
@@ -28,6 +30,17 @@ import zio.test._
  * all. That is asserted here.
  */
 object FailureAccumulatorSpec extends ZIOSpecDefault {
+
+  /**
+   * Runs each task on the thread that submits it. A fiber resumed through this
+   * executor runs inside the call that resumed it, which lets a test fix what
+   * that fiber observes at the moment of resumption.
+   */
+  private val sameThread: Executor =
+    Executor.fromExecutionContext(new ExecutionContext {
+      def execute(runnable: Runnable): Unit = runnable.run()
+      def reportFailure(cause: Throwable): Unit = throw cause
+    })
 
   private def causeOf(exit: Exit[String, Unit]): Option[Cause[String]] =
     exit match {
@@ -87,12 +100,24 @@ object FailureAccumulatorSpec extends ZIOSpecDefault {
         } yield assertTrue(causeOf(result).exists(_.failures == List("real")))
       },
       test("recording is sequenced before the signal fires") {
+        // Fail-fast interrupts the other workers as soon as `await` completes,
+        // so the cause must be readable at that instant, not merely once
+        // `record` returns. A single fiber calling `record` and then reading
+        // cannot tell the two orders apart, and an observer racing on another
+        // thread nearly always loses to `record`'s next step. So the observer
+        // is forked onto a same-thread executor: the fork runs it on this
+        // thread until it parks on `await`, and firing the signal resumes it
+        // synchronously, inside `record`, so it reads before `record` goes on.
+        // Every run observes the instant the signal fires. The repetitions are
+        // insurance: should ZIO stop resuming the observer synchronously, the
+        // observation degrades to a race, which repetition keeps likely to
+        // catch a wrong order.
         for {
           acc <- FailureAccumulator.make[String]
+          observer <- (acc.await *> acc.result).fork.onExecutor(sameThread)
           _ <- acc.record(Cause.fail("boom"))
-          _ <- acc.await
-          result <- acc.result
-        } yield assertTrue(causeOf(result).exists(_.failures == List("boom")))
-      }
+          seen <- observer.join
+        } yield assertTrue(causeOf(seen).exists(_.failures == List("boom")))
+      } @@ TestAspect.nonFlaky(100)
     )
 }
