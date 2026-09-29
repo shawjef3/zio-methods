@@ -217,13 +217,7 @@ worker owns a whole chunk starves workers whenever there are fewer chunks than
 There is no barrier at chunk boundaries (a worker that finishes an element
 immediately claims the next), so one slow `f` never idles the other workers.
 
-The round/cursor protocol itself: a *round* holds a chunk, a cursor, a claim size,
-and a promise for the next round. Each worker claims a range with
-`i = cursor.getAndAdd(claimSize)`; `i < length` runs `f` over
-`[i, min(i + claimSize, length))`, `i >= length` means the round is drained and
-elects one worker as the designated fetcher, and a worker that is not elected
-awaits the next round. Terminal rounds carry the end-of-stream or failure
-signal, and are detected before the cursor is touched.
+The round/cursor protocol itself: a *round* holds a chunk, a cursor, a claim size, and a promise for the next round. Each worker claims a range with `i = cursor.getAndAdd(claimSize)`; `i < length` runs `f` over `[i, min(i + claimSize, length))`, `i >= length` means the round is drained and elects one worker as the designated fetcher, and a worker that is not elected awaits the next round. A terminal round signals end of stream or failure, and is detected before the cursor is touched. It carries no cause: the fetcher that pulled a failure reports it once, however many workers observe the terminal round.
 
 ### Claims are batched only where batching is free
 
@@ -257,10 +251,7 @@ claim serialized 80 ms behind everyone else. Requiring several claims per worker
 keeps the amortization where `f` is cheap and restores fine-grained balance
 where it is not.
 
-Claim size 1 is kept as a literal fast path (`getAndIncrement` rather than
-`getAndAdd(1)`, `f` invoked directly rather than through the range loop, and no
-election flag allocated), so the slow-`f` regime runs the pre-batching code with
-no added work. Without that fast path it measured ~2–4% slower at `n = 16384`.
+A round with claim size 1 claims with `getAndIncrement` rather than `getAndAdd(1)` and allocates no election flag, so in the slow-`f` regime, where rounds rarely batch, batching costs no allocation and no extra atomic operation.
 
 A claim size above 1 also changes how the fetcher is elected. With single-element claims the
 cursor's values are consecutive, so exactly one worker sees `i == length` and
@@ -329,10 +320,7 @@ common case for chunks of any real size. Measured at one element per chunk:
 
 - `n <= 0` short-circuits to `runForeach`. `n == 1` does not, as the caveats
   above explain: it keeps the worker topology.
-- Everything here uses public ZIO API. `Promise#done(Exit.unit)` stands in for
-  the `private[zio]` `succeedUnit` (`Exit.unit` is a singleton, so it allocates
-  nothing either), and terminal rounds simply leave their unused `next` promise
-  uncompleted rather than reaching for `Promise#unsafe.done`.
+- Everything here uses public ZIO API. `Promise#done(Exit.unit)` stands in for the `private[zio]` `succeedUnit` (`Exit.unit` is a singleton, so it allocates nothing either), and a terminal round has no `next` promise at all, so there is none to complete.
 - The workers are started by `WorkerPool` rather than by
   `ZIO.foreachParDiscard`, which is what the library call resolves to. That
   version retains a `Chunk` of all `n` `Fiber.Runtime`s for the length of the
@@ -413,13 +401,9 @@ law ideal of `n / mean_latency`, with a 200 microsecond parked `f`:
 Throughput peaks near `n = 1024` and declines after, so **sizing `n` beyond a few
 hundred buys progressively less and beyond ~1000 buys nothing**, well below the
 tens of thousands the high-concurrency numbers above might suggest. The cause is
-the per-round wake, and `OPTIMIZATION_IDEAS.md` has the candidate fixes; none is
-implemented.
+the per-round wake, which `WakeHerdBenchmark` isolates.
 
-Batching does not engage in this regime at all, since rounds hold fewer than
-`n * 8` elements and the claim size is 1, and the single-element-claim fast paths exist to keep
-it costing nothing there: measured against per-element claims it is a wash
-(3.21 ± 0.11 vs 3.24 ± 0.05 ops/s at `n = 16384`).
+Batching does not engage in this regime at all, since rounds hold fewer than `n * 8` elements and the claim size is 1.
 
 ### Where parallelism starts paying
 
@@ -479,7 +463,7 @@ real I/O is far past it.
 
 ## Layout
 
-- `stream` (root): the library + `zio-test` spec.
+- `stream` (root): the library and its `zio-test` specs.
 - `benchmarks`: JMH subproject (sbt-jmh), ZIO-only benchmarks (the
   Akka/fs2/cats-effect comparisons from the original ZIO benchmark were
   dropped).
