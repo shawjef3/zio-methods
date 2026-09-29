@@ -76,7 +76,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   // `ensuring`, a `foldCauseZIO` whose frame sits at the bottom of the
   // worker's stack until it exits and holds the wrapped effect; with `n == 1`
   // there is no fork, and the `.unit` map frame holds it on the calling fiber
-  // instead. An effect that captured the seed, as `loop(seed, 0)` does once
+  // instead. An effect that captured the seed, as `loop(seed)` does once
   // called, would pin the whole chain from there.
   //
   // Each worker reads before it counts itself, so the `n`-th increment comes
@@ -84,7 +84,7 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   private[this] val start: ZIO[R, Nothing, Unit] = ZIO.suspendSucceed {
     val seed = seedRef.get
     if (started.incrementAndGet() == n) seedRef.set(null)
-    loop(seed, 0)
+    loop(seed)
   }
 
   /**
@@ -146,25 +146,46 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
   private def release(round: Round[E, A]): Unit =
     round.chunk = null.asInstanceOf[Chunk[A]]
 
-  // Runs `f` over one claimed range `[i, until)` of `chunk`, then returns to
-  // the cursor for the next claim. Elements within a claim are chained
-  // directly, so a claim of `stride` elements costs one atomic operation
-  // rather than `stride` of them, which is the point of the whole exercise.
+  // What a worker runs once an `f` that did not complete synchronously
+  // finishes the last element of its claim. Built once per run rather than
+  // per element: it needs no per-element state, because it resumes from
+  // `current` rather than from the round it claimed from (see `current`), and
+  // the trampoline budget in `loop` starts afresh after any suspension.
+  private[this] val resume: Any => ZIO[R, Nothing, Unit] = _ => loop(current)
+
+  // `loop` as a function value, so awaiting a round does not allocate one.
+  private[this] val loopFn: Round[E, A] => ZIO[R, Nothing, Unit] = round => loop(round)
+
+  // Continues a claim `[from, until)` of `chunk` after an element whose `f`
+  // did not complete synchronously. Elements within a claim cost no atomic
+  // operation, which is the point of claiming several at once.
   //
   // `chunk` is passed in rather than re-read from the round: the fetcher may
   // null the field at any time after the boundary, and this range was
-  // reserved before that could happen.
-  private def runClaim(chunk: Chunk[A], i: Int, until: Int, depth: Int): ZIO[R, Nothing, Unit] =
-    f(chunk(i)).foldCauseZIO(
-      onError,
-      // Continue within the claim, or once it is exhausted go back to the
-      // cursor of the newest round, not this one: see `current`. A failure
-      // ends this worker's loop exactly as in the unbatched path: the rest of
-      // the claim is abandoned, which is what fail-fast means here.
-      _ =>
-        if (i + 1 < until) runClaim(chunk, i + 1, until, depth + 1)
-        else loop(current, depth + 1)
-    )
+  // reserved before that could happen. The loop is bounded by the claim,
+  // which `Round.MaxStride` caps, so it needs no trampoline budget of its own.
+  private def runClaim(chunk: Chunk[A], from: Int, until: Int): ZIO[R, Nothing, Unit] = {
+    var j = from
+    while (j < until) {
+      val effect = f(chunk(j))
+      j += 1
+      effect match {
+        case _: Exit.Success[_] => ()
+        // A failure ends this worker's loop: the rest of the claim is
+        // abandoned, which is what fail-fast means here.
+        case failure: Exit.Failure[E1 @unchecked] => return onError(failure.cause)
+        case _ => return continueAfter(effect, chunk, j, until)
+      }
+    }
+    loop(current)
+  }
+
+  // Sequences what comes after an `f` that did not complete synchronously:
+  // the rest of its claim, or, at the end of the claim, back to the cursor of
+  // the newest round. Only the first case needs a closure of its own.
+  private def continueAfter(effect: ZIO[R, E1, Any], chunk: Chunk[A], next: Int, until: Int): ZIO[R, Nothing, Unit] =
+    if (next < until) effect.foldCauseZIO(onError, _ => runClaim(chunk, next, until))
+    else effect.foldCauseZIO(onError, resume)
 
   // Whether this worker is the round's designated fetcher.
   //
@@ -200,49 +221,42 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
           },
         chunk => {
           val nextRound = Round.data[E, A](chunk, n)
-          publish(round, nextRound) *> loop(nextRound, 0)
+          publish(round, nextRound) *> loop(nextRound)
         }
       )
     }
 
   // Someone else is fetching; wait for the published round.
   private def awaitNext(round: Round[E, A]): ZIO[R, Nothing, Unit] =
-    round.next.await.flatMap(loop(_, 0))
+    round.next.await.flatMap(loopFn)
 
-  // A `ZIO.whileLoop` version of this loop was implemented and reverted: it
-  // cut allocation by 23-38% while costing ~30% throughput, with
-  // non-overlapping error bars. Throughput is the objective and allocation
-  // only a diagnostic, so the recursive loop wins. The per-iteration graph
-  // rebuilding that `whileLoop` avoids is evidently cheap enough for the
-  // JIT to handle, consistent with hoisting the worker closures out of the
-  // loop also measuring as a no-op. Don't retry either without a benchmark.
-  def loop(round: Round[E, A], depth: Int): ZIO[R, Nothing, Unit] =
-    // A terminal round only signals "stop". The cause, if any, was already
-    // reported once by the fetcher that pulled it, so workers arriving here
-    // must not report it again.
-    if (round.terminal) Exit.unit
-    // Trampoline. `Exit` overrides `foldCauseZIO` to run its continuation
-    // *inline* rather than returning to the ZIO interpreter, so when `f`
-    // returns an `Exit` (`Exit.unit`, `Exit.succeed(a)`), the whole
-    // `loop`/`runClaim` cycle is ordinary JVM recursion and the stack grows
-    // with the round, not with the claim. Any other effect, `ZIO.succeed` and
-    // `ZIO.unit` included, goes back to the interpreter's loop before the
-    // continuation runs, and never builds the chain.
-    // `MaxStride` bounds a single claim; it does not bound this.
-    // Measured before the fix: a single 200k-element chunk with a no-op `f`
-    // overflows a 512KB stack, and the error escapes as a fiber defect.
-    //
-    // `suspendSucceed` returns control to the interpreter, which unwinds the
-    // stack and resumes from the returned effect. It is cheaper than
-    // `yieldNow`, which would additionally force a scheduling round-trip.
-    // The counter resets on every trampoline, so this costs one extra effect
-    // node per `TrampolineEvery` elements and nothing on a suspending `f`,
-    // where the chain never builds up in the first place.
-    else if (depth >= Dispatcher.TrampolineEvery) ZIO.suspendSucceed(loop(round, 0))
-    else {
+  // Claims from `round` until it runs out, running `f` on each claimed element.
+  //
+  // An `f` that returns an already-completed `Exit` (`Exit.unit`,
+  // `Exit.succeed(a)`) is handled right here, in a plain JVM loop: its result
+  // is known, so there is nothing to sequence and no effect node or closure to
+  // build. Every other effect, `ZIO.succeed` and `ZIO.unit` included, is handed
+  // back to the interpreter with a continuation, the pre-built `resume` when
+  // the claim ends with it. So the loop never recurses on the JVM stack.
+  //
+  // This is not the `ZIO.whileLoop` version that was implemented and reverted
+  // (it cut allocation by 23-38% while costing ~30% throughput): that one ran
+  // every element through the interpreter. Hoisting the per-element closure
+  // alone also measured as a no-op before; what this removes for an `Exit`
+  // result is the closure, the recursion and the interpreter round trip
+  // together.
+  def loop(round: Round[E, A]): ZIO[R, Nothing, Unit] = {
+    // How many synchronously completed elements may run before control goes
+    // back to the interpreter. See `Dispatcher.TrampolineEvery`.
+    var budget = Dispatcher.TrampolineEvery
+    while (true) {
+      // A terminal round only signals "stop". The cause, if any, was already
+      // reported once by the fetcher that pulled it, so workers arriving here
+      // must not report it again.
+      if (round.terminal) return Exit.unit
       // Read the chunk once. A drained round's `chunk` is nulled by the
       // fetcher, and a worker can re-enter `loop` on such a round; reading
-      // into a local keeps the length checks and the element read consistent
+      // into a local keeps the length checks and the element reads consistent
       // with each other regardless of when that happens.
       val chunk = round.chunk
       val length = if (chunk eq null) 0 else chunk.length
@@ -253,41 +267,51 @@ private[stream] final class Dispatcher[R, E <: E1, E1, A](
       // whenever `f` is slow enough that a round offers fewer than
       // `ClaimsPerWorker` elements per worker.
       val i = if (stride == 1) round.cursor.getAndIncrement() else round.cursor.getAndAdd(stride)
-      if (i < length)
-        // The claimed elements are read out of the local `chunk` before `f`
-        // runs, so `f` never reaches back into the round. A stride-1 claim
-        // covers a single element, so it goes straight to `f` and skips
-        // `runClaim`'s range bookkeeping entirely, so that path is then exactly
-        // the pre-batching loop, and stays inline here so it gains no frame.
-        // Either way the continuation resumes from `current` rather than
-        // capturing `round`, so an `f` that runs long pins no rounds.
-        if (stride == 1) f(chunk(i)).foldCauseZIO(onError, _ => loop(current, depth + 1))
-        else runClaim(chunk, i, (i + stride) min length, depth)
-      else if (isFetcher(round, chunk, i, length, stride)) fetchAndPublish(round)
-      else awaitNext(round)
+      if (i >= length)
+        return if (isFetcher(round, chunk, i, length, stride)) fetchAndPublish(round) else awaitNext(round)
+      // The claimed elements are read out of the local `chunk` before `f`
+      // runs, so `f` never reaches back into the round, and a suspended `f`
+      // resumes from `current` rather than capturing `round`, so an `f` that
+      // runs long pins no rounds.
+      val until = if (stride == 1) i + 1 else (i + stride) min length
+      var j = i
+      while (j < until) {
+        val effect = f(chunk(j))
+        j += 1
+        effect match {
+          case _: Exit.Success[_] => ()
+          // A failure ends this worker's loop: the rest of the claim is
+          // abandoned, which is what fail-fast means here.
+          case failure: Exit.Failure[E1 @unchecked] => return onError(failure.cause)
+          case _ => return continueAfter(effect, chunk, j, until)
+        }
+      }
+      budget -= until - i
+      if (budget <= 0) return ZIO.suspendSucceed(loop(round))
     }
+    // Unreachable: every way out of the loop above is a `return`.
+    Exit.unit
+  }
 }
 
 private[stream] object Dispatcher {
 
   /**
-   * How many consecutive elements a worker may run before returning control to
-   * the ZIO interpreter, unwinding the JVM stack.
+   * How many elements whose `f` completed synchronously a worker may run in
+   * `loop` before handing control back to the ZIO interpreter.
    *
-   * `Exit` overrides `foldCauseZIO` to invoke its continuation inline, so an
-   * `f` that returns an `Exit` (`Exit.unit`, `Exit.succeed(a)`) turns the
-   * `loop`/`runClaim` cycle into plain JVM recursion whose depth is the length
-   * of the round. Measured before this existed: a single 200,000-element chunk
-   * with a no-op `f` overflows a 512KB stack, and the `StackOverflowError`
-   * escapes as a fiber defect rather than something a caller can catch. Any
-   * other effect, even a synchronous `ZIO.succeed` or `ZIO.unit`, is a node
-   * the interpreter evaluates in its own loop before invoking the
-   * continuation, so it never builds the chain, which is why the existing
-   * tests and the I/O-shaped benchmarks never hit it.
+   * An `f` that returns an already-completed `Exit` is handled inline, so
+   * without a bound one worker could run an entire round, however large,
+   * without ever returning to the interpreter. It would then never reach an
+   * operation boundary, so it would not yield its thread to other fibers and
+   * would not notice interruption: a fail-fast teardown would wait for the
+   * round. Returning an effect every so often restores both, and costs one
+   * `suspendSucceed` node per `TrampolineEvery` elements.
    *
-   * 512 sits ~200x below the measured overflow point on the smallest stack
-   * tested, and costs one extra effect node per 512 elements, under 0.2% of
-   * the per-element work even when `f` is a no-op.
+   * This used to bound JVM recursion as well, back when an `Exit` result ran
+   * its continuation inline through `Exit#foldCauseZIO`: a single
+   * 200,000-element chunk with a no-op `f` overflowed a 512KB stack. `loop` no
+   * longer recurses, and `StackSafetySpec` still covers that case.
    */
   private final val TrampolineEvery = 512
 
