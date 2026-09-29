@@ -232,17 +232,21 @@ private[stream] final class Dispatcher[R, E, A](
   private[this] val loopFn: Round[A] => ZIO[R, Nothing, Unit] = round => loop(round)
 
   /**
-   * Continues a claim `[from, until)` of `chunk` after an element whose `f` did
-   * not complete synchronously, handling each result as [[loop]] does. Elements
-   * within a claim cost no atomic operation, which is the point of claiming
-   * several at once.
+   * Runs `f` over `[from, until)` of `chunk` for as long as each result is an
+   * already-completed `Exit`, with no atomic operation between elements, which
+   * is the point of claiming several at once. Returns `null` once the whole
+   * range has run, or else the effect the worker goes on with: `onError` after a
+   * failure, or [[continueAfter]] after an `f` that did not complete
+   * synchronously. `null` rather than an `Option` or a sentinel effect, so a
+   * range that runs to the end allocates nothing, and the caller's check costs
+   * one comparison per claim, not per element.
    *
    * `chunk` is passed in rather than re-read from the round, which the fetcher
    * may release at any time after the boundary; this range was reserved before
    * that could happen. The loop is bounded by the claim, which
    * `Round.MaxClaimSize` caps, so it needs no trampoline budget of its own.
    */
-  private def runClaim(chunk: Chunk[A], from: Int, until: Int): ZIO[R, Nothing, Unit] = {
+  private def runInline(chunk: Chunk[A], from: Int, until: Int): ZIO[R, Nothing, Unit] = {
     var j = from
     while (j < until) {
       val effect = f(chunk(j))
@@ -253,7 +257,16 @@ private[stream] final class Dispatcher[R, E, A](
         case _ => return continueAfter(effect, chunk, j, until)
       }
     }
-    loop(latest)
+    null
+  }
+
+  /**
+   * Continues a claim `[from, until)` of `chunk` after an element whose `f` did
+   * not complete synchronously, then goes back to [[loop]] once it is done.
+   */
+  private def runClaim(chunk: Chunk[A], from: Int, until: Int): ZIO[R, Nothing, Unit] = {
+    val next = runInline(chunk, from, until)
+    if (next ne null) next else loop(latest)
   }
 
   /**
@@ -327,7 +340,7 @@ private[stream] final class Dispatcher[R, E, A](
    * without reporting anything: its cause was reported by its fetcher.
    *
    * An `f` that returns an already-completed `Exit` (`Exit.unit`,
-   * `Exit.succeed(a)`) is handled right here, in a plain JVM loop: its result is
+   * `Exit.succeed(a)`) is handled inline by [[runInline]], in a plain JVM loop: its result is
    * known, so there is nothing to sequence and no effect node or closure to
    * build. Every other effect, `ZIO.succeed` and `ZIO.unit` included, goes back
    * to the interpreter through [[continueAfter]]. So the loop never recurses on
@@ -356,16 +369,8 @@ private[stream] final class Dispatcher[R, E, A](
       if (i >= length)
         return if (isFetcher(round, chunk, i, length, claimSize)) fetchAndPublish(round) else awaitNext(round)
       val until = if (claimSize == 1) i + 1 else (i + claimSize) min length
-      var j = i
-      while (j < until) {
-        val effect = f(chunk(j))
-        j += 1
-        effect match {
-          case _: Exit.Success[_] => ()
-          case failure: Exit.Failure[E @unchecked] => return onError(failure.cause)
-          case _ => return continueAfter(effect, chunk, j, until)
-        }
-      }
+      val next = runInline(chunk, i, until)
+      if (next ne null) return next
       budget -= until - i
       if (budget <= 0) return ZIO.suspendSucceed(loop(round))
     }
