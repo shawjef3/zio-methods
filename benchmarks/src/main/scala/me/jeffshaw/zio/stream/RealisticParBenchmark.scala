@@ -57,7 +57,7 @@ class RealisticParBenchmark {
 
   private def fSpin: AnyRef => ZIO[Any, Nothing, Any] = { e =>
     ZIO.succeed {
-      val deadline = java.lang.System.nanoTime() + 5_000_000L
+      val deadline = java.lang.System.nanoTime() + 5L * 1000 * 1000
       var acc = java.lang.System.identityHashCode(e).toLong
       while (java.lang.System.nanoTime() < deadline)
         acc = acc * 6364136223846793005L + 1442695040888963407L
