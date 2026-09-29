@@ -291,3 +291,18 @@ sbt "benchmarks/Jmh/run -f 5 -wi 5 -i 5 -jvmArgsAppend -XX:-UseTypeProfile Fetch
 ```
 
 Without them, forks of the same build settle into one of two JIT modes about 10% apart, depending on whether C2's receiver-type profile lets it inline the lambdas at the dispatch loop's call sites. A split that size widens the error bars enough to hide a real difference or fake one, especially for a change that alters closure shapes. `-XX:TypeProfileWidth=8` puts every fork in the fast mode, though a benchmark whose setup exercises many code paths first can still land in the slow one. `-XX:-UseTypeProfile` disables profile-driven devirtualization, so every fork lands in the slow mode: absolute scores run below what production sees, but the difference between two revisions stays comparable. Trust a difference only when it has the same sign under both.
+
+### Releasing
+
+```
+sbt release
+```
+
+`version.sbt` holds the next version as a snapshot. `release` asks for the release version and the following snapshot version, defaulting to the current version without `-SNAPSHOT` and the next patch after it; `sbt "release with-defaults"` takes both defaults without asking. It then checks for snapshot dependencies, runs every spec for each Scala version, commits and tags the release version (`v1.0.0`), publishes signed artifacts for every Scala version, uploads and releases them to Maven Central through the Sonatype Central Portal, and commits and pushes the next snapshot version.
+
+It needs:
+
+- a working tree with no uncommitted changes and no untracked files
+- `SONATYPE_USERNAME` and `SONATYPE_PASSWORD` set to a Central Portal user token
+- a PGP key that `sbt-pgp` can sign with
+- a remote tracking branch to push to
